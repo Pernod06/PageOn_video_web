@@ -1,4 +1,3 @@
-import { nitro } from "nitro/vite";
 import path from "path";
 import AutoImport from "unplugin-auto-import/vite";
 import { defineConfig } from "vite";
@@ -16,11 +15,39 @@ import { fonts } from "./configs/fonts.config";
 export default defineConfig({
   server: {
     host: "0.0.0.0",
-    port: 5000,
+    port: 3000,
+    proxy: {
+      "/api": {
+        target: "http://52.72.117.236:5000",
+        changeOrigin: true,
+        secure: false,
+        timeout: 120000, // 2 minutes timeout
+        proxyTimeout: 120000,
+        ws: true, // Enable websocket proxy
+        configure: (proxy, _options) => {
+          proxy.on("error", (err, _req, _res) => {
+            console.error("[Proxy] ❌ Error:", err.message);
+            console.error("[Proxy] Error details:", err);
+          });
+          proxy.on("proxyReq", (proxyReq, req, _res) => {
+            console.log("[Proxy] 🔄 Sending request:", req.method, req.url);
+            console.log("[Proxy] 🎯 Target:", "http://52.72.117.236:5000" + req.url);
+            // Set timeout on the request
+            proxyReq.setTimeout(120000);
+          });
+          proxy.on("proxyRes", (proxyRes, req, _res) => {
+            console.log("[Proxy] ✅ Response:", proxyRes.statusCode, req.url);
+          });
+          proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
+            console.log("[Proxy] 🔌 WS request:", req.url);
+          });
+        },
+      },
+    },
+    allowedHosts: ["nonfallacious-garrison-nonsocietal.ngrok-free.dev"],
   },
 
   plugins: [
-    nitro(),
     react(),
     Pages({
       dirs: "src/pages",

@@ -1,6 +1,6 @@
 import "./index.css";
 
-import { StrictMode, Suspense } from "react";
+import { Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, useRoutes } from "react-router";
 import routes from "~react-pages";
@@ -13,9 +13,10 @@ function App() {
 const app = createRoot(document.getElementById("root")!);
 
 app.render(
-  <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </StrictMode>,
+  // Temporarily disable StrictMode to debug data loading issue
+  // <StrictMode>
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>,
+  // </StrictMode>,
 );
