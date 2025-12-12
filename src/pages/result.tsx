@@ -1,6 +1,12 @@
-import { Button } from "@/components";
+import { Button, SentenceWithComments } from "@/components";
 import { useLocation, Link } from "react-router";
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  getAllCommentCounts,
+  fetchSentenceComments,
+  postComment,
+  SentenceComment,
+} from "@/services/commentService";
 
 interface VideoData {
   videoInfo?: {
@@ -17,6 +23,11 @@ interface VideoData {
       content: string;
       timestampStart: string;
     }>;
+  }>;
+  chapters?: Array<{
+    timestamp: number;
+    title: string;
+    thumbnail_url?: string;
   }>;
 }
 
@@ -40,6 +51,12 @@ interface Comment {
   reply_count?: number;
 }
 
+interface Chapter {
+  timestamp: number;
+  title: string;
+  thumbnail_url?: string;
+}
+
 declare global {
   interface Window {
     YT?: {
@@ -49,18 +66,78 @@ declare global {
   }
 }
 
-type TabType = "transcript" | "chat" | "comments" | "notes";
+type TabType = "transcript" | "chat" | "notes";
 
-// API配置 - 直接使用公网后端，避免 proxy 的 ERR_CONTENT_LENGTH_MISMATCH 问题
-const API_BASE_URL = "http://52.72.117.236:5000";
+interface Note {
+  id: string;
+  sectionId: string;
+  sentenceIndex: number;
+  contentPreview: string;
+  noteText: string;
+  createdAt: Date;
+}
+
+// API配置
+// 开发环境使用相对路径（通过 vite 代理），生产环境使用完整 URL
+const API_BASE_URL = import.meta.env.DEV ? "" : "http://52.72.117.236:5500";
+
+// 流式请求直接访问后端，绕过 Vite 代理的缓冲问题
+const STREAM_API_URL = "http://52.72.117.236:5500";
+
+// 检测是否在扩展环境中运行
+const isExtension = import.meta.env.VITE_IS_EXTENSION === "true";
 
 export default function Result() {
   const location = useLocation();
-  const { videoId, title } = location.state || {};
+  const {
+    videoId: initialVideoId,
+    title,
+    chapters: initialChapters = [],
+    isExample = false,
+    language = "en",
+    sections: initialSections = null,
+    videoInfo: initialVideoInfo = null,
+    cached = false,
+    streamingUrl = null, // 流式分析 URL
+  } = (location.state as {
+    videoId?: string;
+    title?: string;
+    chapters?: Chapter[];
+    isExample?: boolean;
+    language?: string;
+    sections?: VideoData["sections"];
+    videoInfo?: VideoData["videoInfo"];
+    cached?: boolean;
+    streamingUrl?: string | null;
+  }) || {};
+
+  // 如果有 streamingUrl，videoId 从流式分析中获取
+  const [videoId, setVideoId] = useState<string | undefined>(initialVideoId);
 
   const [videoData, setVideoData] = useState<VideoData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // 流式分析状态
+  const [isStreaming, setIsStreaming] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  // 流式增量解析/节流相关 refs（避免每个 chunk 都 JSON.parse 全量内容导致 UI 卡顿）
+  const fullStreamContentRef = useRef<string>("");
+  const streamChunkAccRef = useRef<string>("");
+  const streamFlushRafRef = useRef<number | null>(null);
+  const streamParseStateRef = useRef<{
+    videoInfoDone: boolean;
+    videoInfoStart: number;
+    sectionsStart: number;
+    scanIndex: number;
+    seenSectionIds: Set<string>;
+  }>({
+    videoInfoDone: false,
+    videoInfoStart: -1,
+    sectionsStart: -1,
+    scanIndex: 0,
+    seenSectionIds: new Set(),
+  });
   const [activeTab, setActiveTab] = useState<TabType>("transcript");
   const [chatMessages, setChatMessages] = useState([
     { type: "bot", content: "Hello! I'm your video assistant. How can I help you?" },
@@ -73,44 +150,610 @@ export default function Result() {
   const [transcriptData, setTranscriptData] = useState<Array<{ timestamp: string; text: string }>>(
     [],
   );
-  const [translatedData, setTranslatedData] = useState<
-    Array<{ timestamp: string; text: string; translated?: string }>
-  >([]);
   const [currentTranscriptIndex, setCurrentTranscriptIndex] = useState<number>(-1);
-  const [selectedLanguage, setSelectedLanguage] = useState("en"); // 'en', 'zh', 'ja', 'es'
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [showLanguageMenu, setShowLanguageMenu] = useState(false);
-  const [comments, setComments] = useState<Comment[]>([]);
-  const [commentsLoading, setCommentsLoading] = useState(false);
-  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [, setComments] = useState<Comment[]>([]);
+  const [, setCommentsLoading] = useState(false);
+  const [, setCommentsError] = useState<string | null>(null);
+  const [chapters, setChapters] = useState<Chapter[]>(initialChapters);
+
+  // Sentence comments state
+  const [sentenceCommentCounts, setSentenceCommentCounts] = useState<Map<string, number>>(
+    new Map(),
+  );
+
+  // Selected sentence for sidebar comments (Feishu-style)
+  const [selectedSentence, setSelectedSentence] = useState<{
+    videoId: string;
+    sectionId: string;
+    sentenceIndex: number;
+    content: string;
+  } | null>(null);
+  const [sidebarComments, setSidebarComments] = useState<SentenceComment[]>([]);
+  const [sidebarCommentsLoading, setSidebarCommentsLoading] = useState(false);
+  const [newSidebarComment, setNewSidebarComment] = useState("");
+  const [sidebarAuthorName, setSidebarAuthorName] = useState("");
+  const [isSubmittingSidebarComment, setIsSubmittingSidebarComment] = useState(false);
+
+  // Notes state
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [editingNote, setEditingNote] = useState<{
+    sectionId: string;
+    sentenceIndex: number;
+    content: string;
+  } | null>(null);
+  const [noteInputText, setNoteInputText] = useState("");
 
   // 保存完整的 transcript 文本内容
   const transcriptContent = useRef<string>("");
 
   const transcriptRefs = useRef<(HTMLDivElement | null)[]>([]);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const youtubeIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [youtubeStartTime, setYoutubeStartTime] = useState(0);
+
+  // 增量解析：从 SSE 累积文本中尽量提取已"闭合"的 videoInfo / section 对象
+  // @ts-expect-error - This callback is kept for potential future use
+  // eslint-disable-next-line
+  const flushStreamingUpdates = useCallback(() => {
+    streamFlushRafRef.current = null;
+    if (!streamChunkAccRef.current) return;
+
+    fullStreamContentRef.current += streamChunkAccRef.current;
+    streamChunkAccRef.current = "";
+
+    // 清理 markdown 代码块标记（LLM 可能输出 ```json ... ```）
+    let content = fullStreamContentRef.current;
+    // 移除开头的 ```json 或 ```
+    content = content.replace(/^```json?\s*\n?/, "");
+    // 移除结尾的 ```（如果已经完整）
+    content = content.replace(/\n?```\s*$/, "");
+
+    // 调试：打印内容前100字符，看看是否正确
+    if (content.length < 200) {
+      console.log("[Stream] content preview:", content.slice(0, 200));
+    }
+    const state = streamParseStateRef.current;
+    const patch: Partial<VideoData> = {};
+
+    // 1) videoInfo：只要拿到完整的 { ... } 就 parse 一次
+    if (!state.videoInfoDone) {
+      if (state.videoInfoStart === -1) {
+        const idx = content.indexOf('"videoInfo"');
+        if (idx !== -1) state.videoInfoStart = idx;
+      }
+      if (state.videoInfoStart !== -1) {
+        const braceStart = content.indexOf("{", state.videoInfoStart);
+        if (braceStart !== -1) {
+          let depth = 0;
+          let inString = false;
+          let escape = false;
+          for (let i = braceStart; i < content.length; i++) {
+            const ch = content[i];
+            if (escape) {
+              escape = false;
+              continue;
+            }
+            if (ch === "\\\\") {
+              if (inString) escape = true;
+              continue;
+            }
+            if (ch === '"') {
+              inString = !inString;
+              continue;
+            }
+            if (inString) continue;
+            if (ch === "{") depth++;
+            if (ch === "}") {
+              depth--;
+              if (depth === 0) {
+                const objStr = content.slice(braceStart, i + 1);
+                try {
+                  patch.videoInfo = JSON.parse(objStr);
+                  state.videoInfoDone = true;
+                } catch {
+                  // ignore
+                }
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 2) sections：从 "sections": [ 开始扫描，提取闭合的 { ... } section 对象
+    if (state.sectionsStart === -1) {
+      const idx = content.indexOf('"sections"');
+      if (idx !== -1) {
+        const bracketStart = content.indexOf("[", idx);
+        if (bracketStart !== -1) {
+          state.sectionsStart = bracketStart;
+          state.scanIndex = bracketStart + 1;
+        }
+      }
+    }
+
+    if (state.sectionsStart !== -1 && state.scanIndex < content.length) {
+      const newSections: NonNullable<VideoData["sections"]> = [];
+      let inString = false;
+      let escape = false;
+      let objDepth = 0;
+      let objStart = -1;
+
+      for (let i = Math.max(state.scanIndex, state.sectionsStart + 1); i < content.length; i++) {
+        const ch = content[i];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === "\\\\") {
+          if (inString) escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+
+        if (ch === "{") {
+          if (objDepth === 0) objStart = i;
+          objDepth++;
+          continue;
+        }
+        if (ch === "}") {
+          objDepth--;
+          if (objDepth === 0 && objStart !== -1) {
+            const objStr = content.slice(objStart, i + 1);
+            try {
+              const section = JSON.parse(objStr) as NonNullable<VideoData["sections"]>[number];
+              if (section?.id && !state.seenSectionIds.has(section.id)) {
+                state.seenSectionIds.add(section.id);
+                newSections.push(section);
+              }
+            } catch {
+              // ignore
+            }
+            objStart = -1;
+          }
+          continue;
+        }
+
+        // sections 数组闭合
+        if (ch === "]" && objDepth === 0) {
+          state.scanIndex = i + 1;
+          break;
+        }
+
+        state.scanIndex = i;
+      }
+
+      if (newSections.length > 0) {
+        patch.sections = newSections;
+      }
+    }
+
+    if (Object.keys(patch).length > 0) {
+      console.log("[Stream] 解析到数据:", {
+        hasVideoInfo: !!patch.videoInfo,
+        newSectionsCount: patch.sections?.length || 0,
+      });
+      setVideoData((prev) => {
+        const base: VideoData = prev || {};
+        const merged: VideoData = { ...base, ...patch };
+        if (patch.sections) {
+          merged.sections = [...(base.sections || []), ...(patch.sections || [])];
+        }
+        console.log("[Stream] 更新 videoData, sections:", merged.sections?.length || 0);
+        return merged;
+      });
+    } else {
+      // 调试：看看为什么没有解析到数据
+      const state = streamParseStateRef.current;
+      console.log("[Stream] flush 但无数据:", {
+        contentLen: content.length,
+        videoInfoDone: state.videoInfoDone,
+        sectionsStart: state.sectionsStart,
+        scanIndex: state.scanIndex,
+      });
+    }
+  }, []);
+
+  // 流式分析视频
+  const startStreamingAnalysis = useCallback(
+    async (url: string) => {
+      console.log("[Result] Starting streaming analysis for:", url);
+      setIsStreaming(true);
+      setLoading(true);
+      setVideoData(null);
+      fullStreamContentRef.current = "";
+      streamChunkAccRef.current = "";
+      streamParseStateRef.current = {
+        videoInfoDone: false,
+        videoInfoStart: -1,
+        sectionsStart: -1,
+        scanIndex: 0,
+        seenSectionIds: new Set(),
+      };
+
+      abortControllerRef.current = new AbortController();
+
+      try {
+        const response = await fetch(`${STREAM_API_URL}/api/process-video/stream`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+            "Cache-Control": "no-cache",
+          },
+          cache: "no-store",
+          body: JSON.stringify({ url, language }),
+          signal: abortControllerRef.current.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`服务器错误: ${response.status}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error("无法读取响应流");
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const payload = line.slice(6);
+              if (!payload) continue;
+
+              // 处理特殊标签：[DONE] [CACHED] [ERROR]
+              if (payload.startsWith("[DONE]") || payload.startsWith("[CACHED]")) {
+                const jsonText = payload.replace(/^\[(DONE|CACHED)\]\s*/, "");
+                try {
+                  const finalData = JSON.parse(jsonText) as VideoData;
+                  console.log("[Result] Streaming complete:", finalData);
+                  setVideoData(finalData);
+                  setVideoId(finalData.videoInfo?.videoId);
+                  if (finalData.chapters) {
+                    setChapters(finalData.chapters as Chapter[]);
+                  }
+                  setIsStreaming(false);
+                  setLoading(false);
+                } catch (e) {
+                  console.error("[Result] Failed to parse DONE/CACHED JSON:", e);
+                  setIsStreaming(false);
+                  setLoading(false);
+                  setError("解析最终结果失败");
+                }
+                continue;
+              }
+
+              if (payload.startsWith("[ERROR]")) {
+                const errorMsg = payload.replace(/^\[ERROR\]\s*/, "");
+                console.error("[Result] Streaming error:", errorMsg);
+                setIsStreaming(false);
+                setLoading(false);
+                setError(errorMsg || "分析失败");
+                continue;
+              }
+
+              // 处理结构化事件流 {"type": "video_info" | "section", "data": {...}}
+              try {
+                const event = JSON.parse(payload);
+                if (event.type && event.data) {
+                  if (event.type === "video_info") {
+                    console.log("[Stream] 收到 video_info 事件:", event.data.title);
+                    setVideoData((prev) => ({
+                      ...(prev ?? {}),
+                      videoInfo: event.data,
+                    }));
+                    setVideoId(event.data.videoId);
+                  } else if (event.type === "section") {
+                    console.log("[Stream] 收到 section 事件:", event.data.id, event.data.title);
+                    setVideoData((prev) => ({
+                      ...(prev ?? {}),
+                      sections: [...(prev?.sections || []), event.data],
+                    }));
+                  }
+                  continue;
+                }
+              } catch {
+                // 不是结构化事件，忽略
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if ((err as Error).name === "AbortError") {
+          console.log("[Result] Streaming aborted");
+          return;
+        }
+        console.error("[Result] Streaming error:", err);
+        setIsStreaming(false);
+        setLoading(false);
+        setError(err instanceof Error ? err.message : "分析失败");
+      }
+    },
+    [language],
+  );
+
+  // 记录是否已经完成流式分析后的初始化
+  const streamingInitializedRef = useRef(false);
 
   useEffect(() => {
-    if (videoId) {
-      console.log("[Result] Component mounted with videoId:", videoId);
+    // 如果有 streamingUrl，启动流式分析（只在首次挂载时）
+    if (streamingUrl) {
+      // 防止 StrictMode 重复调用
+      if (abortControllerRef.current) {
+        return;
+      }
+      console.log("[Result] Starting streaming analysis for URL:", streamingUrl);
+      startStreamingAnalysis(streamingUrl);
+      return () => {
+        abortControllerRef.current?.abort();
+      };
+    }
+
+    // 原有逻辑：使用 videoId 加载数据（仅在非流式模式下）
+    if (videoId && !streamingUrl) {
+      console.log(
+        "[Result] Component mounted with videoId:",
+        videoId,
+        "isExample:",
+        isExample,
+        "cached:",
+        cached,
+      );
       setPlayerReady(false); // 重置 player ready 状态
 
-      // Load all data - they will complete even if component unmounts due to HMR
-      loadVideoData(videoId);
-      loadTranscript(videoId);
-      loadComments(videoId, 20);
+      // 如果有从 index.tsx 传过来的完整数据（翻译后的缓存数据），直接使用
+      if (initialSections && initialVideoInfo) {
+        console.log("[Result] ✅ Using pre-loaded data from navigation state (translated)");
+        setVideoData({
+          videoInfo: initialVideoInfo,
+          sections: initialSections,
+        });
+        setLoading(false);
+      } else {
+        // Load all data - 示例视频优先使用本地缓存
+        loadVideoData(videoId, isExample);
+      }
+
+      loadTranscript(videoId, isExample);
+      if (isExample) {
+        loadChapters(videoId); // 示例视频加载本地 chapters
+      } else {
+        loadComments(videoId, 20); // 非示例视频加载评论
+      }
       initializeYouTubePlayer();
-    } else {
-      console.warn("[Result] No videoId provided");
+    } else if (!streamingUrl && !videoId) {
+      console.warn("[Result] No videoId or streamingUrl provided");
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoId]);
+  }, [isExample, streamingUrl]); // 移除 videoId 依赖，避免流式分析完成后重复触发
 
-  const loadTranscript = async (id: string) => {
-    console.log("[Result] Loading transcript for:", id);
+  // 流式分析完成后，videoId 更新，初始化播放器和加载 transcript（只执行一次）
+  useEffect(() => {
+    if (streamingUrl && videoId && !isStreaming && !streamingInitializedRef.current) {
+      streamingInitializedRef.current = true;
+      console.log(
+        "[Result] Streaming complete, initializing player and loading transcript for:",
+        videoId,
+      );
+      initializeYouTubePlayer();
+      loadTranscript(videoId, false);
+      loadComments(videoId, 20);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoId, isStreaming, streamingUrl]);
 
-    // Try to load from backend API first
+  // Load comment counts when video data is ready
+  useEffect(() => {
+    const loadCommentCounts = async () => {
+      if (!videoId || !videoData?.sections) return;
+
+      // Load comment counts for all sentences
+      const counts = await getAllCommentCounts(videoId);
+      setSentenceCommentCounts(counts);
+      console.log("[Result] Loaded comment counts:", counts.size, "sentences with comments");
+    };
+
+    loadCommentCounts();
+  }, [videoId, videoData?.sections]);
+
+  // Load sidebar comments when selected sentence changes
+  useEffect(() => {
+    const loadSidebarComments = async () => {
+      if (!selectedSentence) {
+        setSidebarComments([]);
+        return;
+      }
+
+      setSidebarCommentsLoading(true);
+      try {
+        const comments = await fetchSentenceComments(
+          selectedSentence.videoId,
+          selectedSentence.sectionId,
+          selectedSentence.sentenceIndex,
+        );
+        setSidebarComments(comments);
+      } catch (err) {
+        console.error("[Result] Failed to load sidebar comments:", err);
+        setSidebarComments([]);
+      } finally {
+        setSidebarCommentsLoading(false);
+      }
+    };
+
+    loadSidebarComments();
+  }, [selectedSentence]);
+
+  // Handle sentence selection for sidebar comments
+  const handleSentenceSelect = useCallback(
+    (
+      info: {
+        videoId: string;
+        sectionId: string;
+        sentenceIndex: number;
+        content: string;
+      } | null,
+    ) => {
+      setSelectedSentence(info);
+      setNewSidebarComment("");
+    },
+    [],
+  );
+
+  // Handle submitting a new comment from sidebar
+  const handleSubmitSidebarComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSidebarComment.trim() || !selectedSentence) return;
+
+    setIsSubmittingSidebarComment(true);
+    try {
+      const posted = await postComment(
+        selectedSentence.videoId,
+        selectedSentence.sectionId,
+        selectedSentence.sentenceIndex,
+        selectedSentence.content,
+        sidebarAuthorName || "Anonymous",
+        newSidebarComment.trim(),
+      );
+
+      if (posted) {
+        setSidebarComments((prev) => [...prev, posted]);
+        setNewSidebarComment("");
+        // Update the comment count
+        const commentKey = `${selectedSentence.sectionId}-${selectedSentence.sentenceIndex}`;
+        setSentenceCommentCounts((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(commentKey, (prev.get(commentKey) || 0) + 1);
+          return newMap;
+        });
+      }
+    } catch (err) {
+      console.error("[Result] Failed to post sidebar comment:", err);
+    } finally {
+      setIsSubmittingSidebarComment(false);
+    }
+  };
+
+  // Handle double-click on sentence to create/edit note
+  const handleSentenceDoubleClick = useCallback(
+    (info: { sectionId: string; sentenceIndex: number; content: string }) => {
+      // Check if there's already a note for this sentence
+      const existingNote = notes.find(
+        (n) => n.sectionId === info.sectionId && n.sentenceIndex === info.sentenceIndex,
+      );
+
+      setEditingNote(info);
+      setNoteInputText(existingNote?.noteText || "");
+      setActiveTab("notes");
+    },
+    [notes],
+  );
+
+  // Save note
+  const handleSaveNote = useCallback(() => {
+    if (!editingNote || !noteInputText.trim()) return;
+
+    const existingNoteIndex = notes.findIndex(
+      (n) => n.sectionId === editingNote.sectionId && n.sentenceIndex === editingNote.sentenceIndex,
+    );
+
+    if (existingNoteIndex >= 0) {
+      // Update existing note
+      setNotes((prev) =>
+        prev.map((n, i) =>
+          i === existingNoteIndex ? { ...n, noteText: noteInputText.trim() } : n,
+        ),
+      );
+    } else {
+      // Create new note
+      const newNote: Note = {
+        id: `note-${Date.now()}`,
+        sectionId: editingNote.sectionId,
+        sentenceIndex: editingNote.sentenceIndex,
+        contentPreview: editingNote.content.slice(0, 100),
+        noteText: noteInputText.trim(),
+        createdAt: new Date(),
+      };
+      setNotes((prev) => [...prev, newNote]);
+    }
+
+    setEditingNote(null);
+    setNoteInputText("");
+  }, [editingNote, noteInputText, notes]);
+
+  // Delete note
+  const handleDeleteNote = useCallback((noteId: string) => {
+    setNotes((prev) => prev.filter((n) => n.id !== noteId));
+  }, []);
+
+  // Cancel note editing
+  const handleCancelNote = useCallback(() => {
+    setEditingNote(null);
+    setNoteInputText("");
+  }, []);
+
+  // 加载本地 chapters 数据（用于示例视频）
+  const loadChapters = async (id: string) => {
+    try {
+      console.log("[Result] 📂 Loading chapters from local cache for:", id);
+      const response = await fetch(`/data/chapter/chapters_${id}.json`);
+
+      if (response.ok) {
+        const data = await response.json();
+        // JSON 结构: { video_id, video_title, chapters: [...] } 或直接是数组
+        const chaptersArray = Array.isArray(data) ? data : data.chapters;
+        if (chaptersArray && chaptersArray.length > 0) {
+          console.log("[Result] ✅ Chapters loaded:", chaptersArray.length, "chapters");
+          setChapters(chaptersArray);
+        } else {
+          console.log("[Result] ⚠️ No chapters in data for:", id);
+        }
+      } else {
+        console.log("[Result] ⚠️ No local chapters found for:", id);
+      }
+    } catch (error) {
+      console.error("[Result] ❌ Failed to load chapters:", error);
+    }
+  };
+
+  const loadTranscript = async (id: string, useLocalCache: boolean = false) => {
+    console.log("[Result] Loading transcript for:", id, "useLocalCache:", useLocalCache);
+
+    // 如果是示例视频，优先使用本地缓存
+    if (useLocalCache) {
+      try {
+        console.log("[Result] 📂 Loading transcript from local cache");
+        const localResponse = await fetch(`/data/transcript/transcript_${id}.txt`);
+
+        if (localResponse.ok) {
+          const text = await localResponse.text();
+          console.log("[Result] ✅ Local transcript loaded, length:", text.length);
+          transcriptContent.current = text;
+          const parsed = parseTranscript(text);
+          setTranscriptData(parsed);
+          return;
+        }
+      } catch (localError) {
+        console.error("[Result] ❌ Local cache failed:", localError);
+      }
+    }
+
+    // Try to load from backend API
     try {
       const url = `${API_BASE_URL}/api/transcript/${id}`;
       console.log("[Result] Attempting API:", url);
@@ -119,17 +762,10 @@ export default function Result() {
       if (response.ok) {
         const text = await response.text();
         console.log("[Result] API response text length:", text.length);
-
-        // 保存完整的原始文本
         transcriptContent.current = text;
-
         const parsed = parseTranscript(text);
         setTranscriptData(parsed);
         console.log("[Result] ✅ Transcript loaded from API, entries:", parsed.length);
-        if (parsed.length > 0) {
-          console.log("[Result] First entry:", parsed[0]);
-          console.log("[Result] Last entry:", parsed[parsed.length - 1]);
-        }
         return;
       } else {
         console.warn("[Result] API returned status:", response.status);
@@ -138,25 +774,17 @@ export default function Result() {
       console.error("[Result] ❌ API failed:", apiError);
     }
 
-    // Fallback: load from local file in src/data/transcript/
+    // Fallback: load from local file
     try {
-      console.log("[Result] Attempting local file: /src/data/transcript/transcript_" + id + ".txt");
-      const localResponse = await fetch(`/src/data/transcript/transcript_${id}.txt`);
+      console.log("[Result] Attempting local fallback: /data/transcript/transcript_" + id + ".txt");
+      const localResponse = await fetch(`/data/transcript/transcript_${id}.txt`);
 
       if (localResponse.ok) {
         const text = await localResponse.text();
-        console.log("[Result] Local file text length:", text.length);
-
-        // 保存完整的原始文本
         transcriptContent.current = text;
-
         const parsed = parseTranscript(text);
         setTranscriptData(parsed);
         console.log("[Result] ✅ Local transcript loaded, entries:", parsed.length);
-        if (parsed.length > 0) {
-          console.log("[Result] First entry:", parsed[0]);
-          console.log("[Result] Last entry:", parsed[parsed.length - 1]);
-        }
       } else {
         console.error("[Result] ❌ Local file not found, status:", localResponse.status);
       }
@@ -294,7 +922,14 @@ export default function Result() {
   };
 
   const initializeYouTubePlayer = () => {
-    // Load YouTube IFrame API
+    if (isExtension) {
+      // 扩展模式：使用沙盒 iframe
+      console.log("[Result] Extension mode: using sandboxed player");
+      // 沙盒播放器通过 postMessage 通信，在 useEffect 中设置监听
+      return;
+    }
+
+    // 普通 web 模式：使用 YouTube IFrame API
     if (!window.YT) {
       const tag = document.createElement("script");
       tag.src = "https://www.youtube.com/iframe_api";
@@ -411,8 +1046,9 @@ export default function Result() {
     [transcriptData, scrollToTranscript],
   );
 
-  // Track video time updates
+  // Track video time updates (web mode)
   useEffect(() => {
+    if (isExtension) return; // 扩展模式下使用 postMessage
     if (!player || !playerReady || transcriptData.length === 0) return;
 
     console.log("[Result] Starting time tracking with", transcriptData.length, "entries");
@@ -433,6 +1069,9 @@ export default function Result() {
       console.log("[Result] Stopped time tracking");
     };
   }, [player, playerReady, transcriptData, updateCurrentTranscript]);
+
+  // 扩展模式：直接使用 YouTube iframe embed，无需沙盒
+  // 时间跳转通过更新 youtubeStartTime state 实现
 
   const parseMessageWithTimestamp = (content: string) => {
     // 匹配[MM:SS] 或者 [HH:MM:SS] 的格式
@@ -486,146 +1125,57 @@ export default function Result() {
 
     console.log("[Result] Jumping to timestamp:", timestamp, "=", seconds, "seconds");
 
-    if (player && playerReady && player.seekTo) {
-      player.seekTo(seconds, true);
-      player.playVideo();
+    if (isExtension) {
+      // 扩展模式：通过更新 iframe src 来跳转时间
+      console.log("[Result] Extension mode: seeking to", seconds, "seconds");
+      setYoutubeStartTime(seconds);
     } else {
-      console.warn("[Result] Player not ready, cannot seek. Ready:", playerReady);
-    }
-  };
-
-  const translateTranscript = async (targetLang: string) => {
-    if (targetLang === "en") {
-      // 英文，清空翻译数据
-      setTranslatedData([]);
-      return;
-    }
-
-    setIsTranslating(true);
-    console.log("[Result] Starting concurrent translation to:", targetLang);
-    console.log("[Result] Total sentences:", transcriptData.length);
-
-    try {
-      // 翻译单个句子的函数
-      const translateSentence = async (
-        item: { timestamp: string; text: string },
-        index: number,
-      ) => {
-        try {
-          const response = await fetch(
-            `https://api.mymemory.translated.net/get?q=${encodeURIComponent(item.text)}&langpair=en|${targetLang}`,
-          );
-
-          if (response.ok) {
-            const data = await response.json();
-            return {
-              index,
-              item: {
-                ...item,
-                translated: data.responseData.translatedText,
-              },
-            };
-          } else {
-            console.warn(`[Result] Translation failed for sentence ${index}`);
-            return {
-              index,
-              item: {
-                ...item,
-                translated: item.text,
-              },
-            };
-          }
-        } catch (error) {
-          console.error(`[Result] Translation error for sentence ${index}:`, error);
-          return {
-            index,
-            item: {
-              ...item,
-              translated: item.text,
-            },
-          };
-        }
-      };
-
-      // 批量并发翻译（每批10个，避免请求过多）
-      const BATCH_SIZE = 10;
-      const results: Array<{ timestamp: string; text: string; translated?: string } | undefined> =
-        new Array(transcriptData.length);
-
-      for (let i = 0; i < transcriptData.length; i += BATCH_SIZE) {
-        const batch = transcriptData.slice(i, i + BATCH_SIZE);
-        console.log(
-          `[Result] Translating batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(transcriptData.length / BATCH_SIZE)}`,
-        );
-
-        // 并发翻译这一批
-        const batchPromises = batch.map((item, batchIndex) =>
-          translateSentence(item, i + batchIndex),
-        );
-
-        const batchResults = await Promise.all(batchPromises);
-
-        // 保存结果
-        batchResults.forEach((result) => {
-          results[result.index] = result.item;
-        });
-
-        // 实时更新显示（过滤掉undefined）
-        const currentTranslated = results.filter((item) => item !== undefined);
-        setTranslatedData([...currentTranslated]);
-
-        // 批次之间稍微延迟，避免API限流
-        if (i + BATCH_SIZE < transcriptData.length) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
+      // Web 模式：直接调用 player API
+      if (player && playerReady && player.seekTo) {
+        player.seekTo(seconds, true);
+        player.playVideo();
+      } else {
+        console.warn("[Result] Player not ready, cannot seek. Ready:", playerReady);
       }
-
-      console.log("[Result] Translation completed, total:", results.length);
-    } catch (error) {
-      console.error("[Result] Translation error:", error);
-      setTranslatedData([]);
-    } finally {
-      setIsTranslating(false);
     }
   };
 
-  const handleLanguageChange = (lang: string) => {
-    setSelectedLanguage(lang);
-    setShowLanguageMenu(false);
-    translateTranscript(lang);
-  };
-
-  // 点击外部关闭语言菜单
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as HTMLElement;
-      if (showLanguageMenu && !target.closest(".language-selector")) {
-        setShowLanguageMenu(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showLanguageMenu]);
-
-  const loadVideoData = async (id: string) => {
+  const loadVideoData = async (id: string, useLocalCache: boolean = false) => {
     try {
-      console.log("[Result] Loading video data for:", id);
-      console.log("[Result] ⚡ CODE UPDATED - NEW VERSION LOADED ⚡");
+      console.log("[Result] Loading video data for:", id, "useLocalCache:", useLocalCache);
       setError(null);
 
-      // Try to load from backend API first
-      // Note: We don't use abort signal here to avoid HMR interruption
+      // 如果是示例视频，优先使用本地缓存
+      if (useLocalCache) {
+        console.log("[Result] 📂 Loading from local cache for example video");
+        try {
+          const localResponse = await fetch(`/data/json/video-data-${id}.json`);
+          if (localResponse.ok) {
+            const localData = await localResponse.json();
+            console.log("[Result] ✅ Local cache loaded successfully");
+            console.log("[Result] Sections count:", localData.sections?.length || 0);
+            setVideoData(localData);
+            setLoading(false);
+            return;
+          }
+        } catch (localError) {
+          console.error("[Result] ❌ Local cache failed:", localError);
+        }
+      }
+
+      // Try to load from backend API
       const timeoutId = setTimeout(() => {
         console.log("[Result] ⏱️ Request taking longer than 60s");
-      }, 60000); // Log warning after 60 seconds
+      }, 60000);
 
       try {
-        const url = `${API_BASE_URL}/api/videos/${id}`;
-        console.log("[Result] 🔍 Fetching from:", url);
+        // 构建 URL，如果有非英文语言则添加 language 参数
+        let url = `${API_BASE_URL}/api/videos/${id}`;
+        if (language && language !== "en") {
+          url += `?language=${language}`;
+        }
+        console.log("[Result] 🔍 Fetching from:", url, "language:", language);
         const response = await fetch(url, {
-          // Don't use signal - let the request complete even if component unmounts
-          // signal: signal,
           headers: {
             Accept: "application/json",
           },
@@ -638,21 +1188,10 @@ export default function Result() {
           throw new Error(`API returned ${response.status}`);
         }
 
-        console.log("[Result] 🔄 Parsing JSON...");
-
         const data = await response.json();
-        console.log("[Result] ✅ JSON parsed successfully, type:", typeof data);
         console.log("[Result] ✅ Video data loaded successfully");
-        console.log("[Result] Data structure:", {
-          hasVideoInfo: !!data.videoInfo,
-          hasSections: !!data.sections,
-          sectionsCount: data.sections?.length || 0,
-        });
-
-        console.log("[Result] 💾 Setting video data state...");
         setVideoData(data);
-        console.log("[Result] 💾 Video data state set successfully");
-        return; // Success, exit early
+        return;
       } catch (fetchError) {
         clearTimeout(timeoutId);
         console.error("[Result] ❌ Fetch error:", fetchError);
@@ -661,17 +1200,14 @@ export default function Result() {
     } catch (apiError) {
       console.error("[Result] Failed to load from API:", apiError);
 
-      // Fallback: Try to load from local data directory (development mode)
+      // Fallback: Try to load from local data directory
       try {
-        console.log(
-          "[Result] Attempting to load local data from /src/data/json/video-data-" + id + ".json",
-        );
-        const localResponse = await fetch(`/src/data/json/video-data-${id}.json`);
+        console.log("[Result] Attempting local fallback: /data/json/video-data-" + id + ".json");
+        const localResponse = await fetch(`/data/json/video-data-${id}.json`);
 
         if (localResponse.ok) {
           const localData = await localResponse.json();
           console.log("[Result] Local data loaded successfully");
-          console.log("[Result] Sections count:", localData.sections?.length || 0);
           setVideoData(localData);
         } else {
           throw new Error("Local data not found");
@@ -758,7 +1294,26 @@ export default function Result() {
 
   const downloadPDF = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/generate-pdf`);
+      // Prepare notes data for PDF export
+      const notesForExport = notes.map((note) => ({
+        sectionId: note.sectionId,
+        sentenceIndex: note.sentenceIndex,
+        contentPreview: note.contentPreview,
+        noteText: note.noteText,
+        createdAt: note.createdAt.toISOString(),
+      }));
+
+      const response = await fetch(`${API_BASE_URL}/api/generate-pdf/${videoId}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          notes: notesForExport,
+          videoTitle: videoData?.videoInfo?.title || title || "Video Analysis",
+        }),
+      });
+
       const blob = await response.blob();
       const downloadUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -770,7 +1325,8 @@ export default function Result() {
     }
   };
 
-  if (!videoId) {
+  // 如果没有 videoId 且没有 streamingUrl，显示错误页面
+  if (!videoId && !streamingUrl) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 p-6">
         <div className="max-w-md space-y-4 rounded-lg border bg-white p-8 text-center shadow-sm">
@@ -800,7 +1356,7 @@ export default function Result() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#faf9f5]">
       {/* Header */}
       <header className="sticky top-0 z-10 border-b bg-white">
         <div className="mx-auto flex max-w-[1600px] items-center justify-between px-6 py-3">
@@ -830,15 +1386,191 @@ export default function Result() {
       </header>
 
       {/* Main Content */}
-      <div className="mx-auto max-w-[1200px] px-6 py-6">
+      <div className="mx-auto max-w-[1400px] px-6 py-6">
         <div className="flex gap-6">
-          {/* Left Side - Main Content */}
-          <div className="flex-2 space-y-6">
-            {/* Video Information */}
-            <div className="rounded-lg bg-gray-100 p-6">
-              <div className="mb-2 text-xs font-medium tracking-wide text-gray-500 uppercase">
-                Video Information
+          {/* Left Sidebar - Navigation & Comments */}
+          <div className="w-[240px] flex-shrink-0">
+            <div className="sticky top-20 space-y-4">
+              {/* Table of Contents */}
+              <div className="rounded-lg border bg-white p-4">
+                <div className="mb-3 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                  目录
+                </div>
+                <nav className="space-y-1">
+                  {videoData?.sections?.map((section, index) => (
+                    <a
+                      key={section.id}
+                      href={`#section-${section.id}`}
+                      className="block truncate rounded px-2 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
+                      title={section.title}
+                    >
+                      {index + 1}. {section.title}
+                    </a>
+                  ))}
+                  {(!videoData?.sections || videoData.sections.length === 0) && (
+                    <p className="text-xs text-gray-400">加载中...</p>
+                  )}
+                </nav>
               </div>
+
+              {/* Comments Panel - Feishu style */}
+              <div className="rounded-lg border bg-white">
+                <div className="border-b border-gray-100 px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <svg
+                      className="h-4 w-4 text-gray-500"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+                      />
+                    </svg>
+                    <span className="text-xs font-medium text-gray-700">评论</span>
+                  </div>
+                </div>
+
+                {!selectedSentence ? (
+                  <div className="px-4 py-8 text-center">
+                    <svg
+                      className="mx-auto mb-2 h-8 w-8 text-gray-300"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={1.5}
+                        d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"
+                      />
+                    </svg>
+                    <p className="text-xs text-gray-500">悬停在句子上</p>
+                    <p className="text-xs text-gray-400">查看或添加评论</p>
+                  </div>
+                ) : (
+                  <>
+                    {/* Selected sentence preview */}
+                    <div className="border-b border-gray-100 bg-amber-50 px-4 py-2">
+                      <p className="line-clamp-2 text-xs text-amber-800">
+                        "{selectedSentence.content}"
+                      </p>
+                      <button
+                        onClick={() => setSelectedSentence(null)}
+                        className="mt-1 text-[10px] text-amber-600 hover:text-amber-700"
+                      >
+                        取消选择
+                      </button>
+                    </div>
+
+                    {/* Comments list */}
+                    <div className="max-h-[280px] overflow-y-auto">
+                      {sidebarCommentsLoading ? (
+                        <div className="flex items-center justify-center py-6">
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></div>
+                        </div>
+                      ) : sidebarComments.length === 0 ? (
+                        <div className="px-4 py-6 text-center">
+                          <p className="text-xs text-gray-500">暂无评论</p>
+                          <p className="text-xs text-gray-400">成为第一个评论者！</p>
+                        </div>
+                      ) : (
+                        <div className="divide-y divide-gray-50">
+                          {sidebarComments.map((comment) => (
+                            <div key={comment.id} className="px-4 py-3">
+                              <div className="flex gap-2">
+                                {comment.avatar && (
+                                  <img
+                                    src={comment.avatar}
+                                    alt={comment.author}
+                                    className="h-5 w-5 flex-shrink-0 rounded-full bg-gray-100"
+                                  />
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <div className="mb-1 flex items-baseline gap-1">
+                                    <span className="text-[11px] font-medium text-gray-900">
+                                      {comment.author}
+                                    </span>
+                                    {comment.is_ai_generated && (
+                                      <span className="rounded bg-purple-100 px-1 py-0.5 text-[8px] font-medium text-purple-600">
+                                        AI
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] leading-relaxed text-gray-700">
+                                    {comment.comment_text}
+                                  </p>
+                                  <span className="text-[9px] text-gray-400">
+                                    {new Date(comment.created_at).toLocaleDateString()}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Add comment form */}
+                    <form
+                      onSubmit={handleSubmitSidebarComment}
+                      className="border-t border-gray-100 p-3"
+                    >
+                      <input
+                        type="text"
+                        placeholder="你的名字（可选）"
+                        value={sidebarAuthorName}
+                        onChange={(e) => setSidebarAuthorName(e.target.value)}
+                        className="mb-2 w-full rounded border border-gray-200 px-2 py-1 text-[11px] focus:border-blue-400 focus:outline-none"
+                      />
+                      <div className="flex gap-1">
+                        <input
+                          type="text"
+                          placeholder="添加评论..."
+                          value={newSidebarComment}
+                          onChange={(e) => setNewSidebarComment(e.target.value)}
+                          className="flex-1 rounded border border-gray-200 px-2 py-1.5 text-[11px] focus:border-blue-400 focus:outline-none"
+                          disabled={isSubmittingSidebarComment}
+                        />
+                        <button
+                          type="submit"
+                          disabled={!newSidebarComment.trim() || isSubmittingSidebarComment}
+                          className="rounded bg-blue-600 px-2 py-1.5 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+                        >
+                          {isSubmittingSidebarComment ? (
+                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                          ) : (
+                            <svg
+                              className="h-3 w-3"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                              />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Middle - Main Content */}
+          <div className="min-w-0 flex-1 space-y-6">
+            {/* Video Information */}
+            <div className="rounded-lg bg-white p-6">
               <h1 className="mb-3 text-2xl font-bold text-gray-900">
                 {videoData?.videoInfo?.title || title || "Video Analysis"}
               </h1>
@@ -855,12 +1587,7 @@ export default function Result() {
                 </div>
               </div>
 
-              {loading ? (
-                <div className="p-12 text-center">
-                  <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent"></div>
-                  <p className="text-gray-600">Loading content...</p>
-                </div>
-              ) : error ? (
+              {error ? (
                 <div className="p-12 text-center">
                   <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-red-100">
                     <svg
@@ -886,48 +1613,166 @@ export default function Result() {
                 </div>
               ) : !videoData?.sections || videoData.sections.length === 0 ? (
                 <div className="p-12 text-center">
-                  <p className="text-gray-600">No content sections available</p>
+                  {isStreaming ? (
+                    <div className="flex items-center justify-center gap-3">
+                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"></div>
+                      <p className="text-gray-600">AI 正在分析视频内容...</p>
+                    </div>
+                  ) : (
+                    <p className="text-gray-600">No content sections available</p>
+                  )}
                 </div>
               ) : (
                 <div className="divide-y">
-                  {videoData?.sections?.map((section) => (
-                    <div key={section.id} className="p-6">
-                      {/* Section Title */}
-                      <div className="mb-4 border-b border-gray-100 pb-3">
-                        <h2 className="text-lg font-bold text-gray-900">{section.title}</h2>
-                      </div>
+                  {videoData?.sections?.map((section) => {
+                    // 根据 section 中间 content 的时间戳找到对应的 chapter
+                    let matchedChapter: Chapter | undefined;
 
-                      {/* Section Content */}
-                      <p className="text-sm leading-relaxed text-gray-700">
-                        {section.content?.map((item, itemIndex) => (
-                          <>
-                            <span
-                              key={itemIndex}
-                              draggable="true"
-                              onDragStart={(e) => {
-                                // 保存句子内容到拖拽数据
-                                e.dataTransfer.setData("text/plain", item.content);
-                                e.dataTransfer.effectAllowed = "copy";
+                    if (
+                      chapters &&
+                      chapters.length > 0 &&
+                      section.content &&
+                      section.content.length > 0
+                    ) {
+                      // 获取 section 中间 content 的时间戳并转换为秒数
+                      const midIndex = Math.floor(section.content.length / 2);
+                      const midTimestamp = section.content[midIndex].timestampStart;
+                      const parts = midTimestamp.split(":").map(Number);
+                      let sectionMidSeconds = 0;
+                      if (parts.length === 2) {
+                        sectionMidSeconds = parts[0] * 60 + parts[1];
+                      } else if (parts.length === 3) {
+                        sectionMidSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                      }
 
-                                // 视觉反馈
-                                e.currentTarget.style.opacity = "0.5";
+                      // 找到时间戳小于等于 section 中间时间的最后一个 chapter
+                      for (let i = chapters.length - 1; i >= 0; i--) {
+                        if (chapters[i].timestamp <= sectionMidSeconds) {
+                          matchedChapter = chapters[i];
+                          break;
+                        }
+                      }
+
+                      // 如果没找到（section 时间早于所有 chapter），使用第一个 chapter
+                      if (!matchedChapter && chapters.length > 0) {
+                        matchedChapter = chapters[0];
+                      }
+                    }
+
+                    return (
+                      <div
+                        key={section.id}
+                        id={`section-${section.id}`}
+                        className="scroll-mt-20 p-6"
+                      >
+                        {/* Section Header with Thumbnail */}
+                        <div className="mb-4 flex gap-4">
+                          {/* Chapter Thumbnail */}
+                          {matchedChapter && (
+                            <div
+                              onClick={() => {
+                                const minutes = Math.floor(matchedChapter.timestamp / 60);
+                                const seconds = matchedChapter.timestamp % 60;
+                                const timeStr = `${minutes}:${seconds.toString().padStart(2, "0")}`;
+                                jumpToTimestamp(timeStr);
                               }}
-                              onDragEnd={(e) => {
-                                // 恢复视觉反馈
-                                e.currentTarget.style.opacity = "1";
-                              }}
-                              onClick={() => jumpToTimestamp(item.timestampStart)}
-                              className="cursor-pointer rounded-sm px-0.5 transition-colors hover:bg-blue-100 hover:text-blue-900"
-                              title="Click to jump, Drag to chat"
+                              className="group relative w-40 flex-shrink-0 cursor-pointer overflow-hidden rounded-lg"
                             >
-                              {item.content}
-                            </span>
-                            {itemIndex < (section.content?.length || 0) - 1 && " "}
-                          </>
-                        ))}
-                      </p>
-                    </div>
-                  ))}
+                              <div className="aspect-video bg-gray-100">
+                                {matchedChapter.thumbnail_url ? (
+                                  <img
+                                    src={matchedChapter.thumbnail_url}
+                                    alt={matchedChapter.title}
+                                    className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                                  />
+                                ) : (
+                                  <div className="flex h-full w-full items-center justify-center bg-gray-200">
+                                    <svg
+                                      className="h-6 w-6 text-gray-400"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+                                      />
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                      />
+                                    </svg>
+                                  </div>
+                                )}
+                                {/* Timestamp Badge */}
+                                <div className="absolute right-1 bottom-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                                  {Math.floor(matchedChapter.timestamp / 60)}:
+                                  {(matchedChapter.timestamp % 60).toString().padStart(2, "0")}
+                                </div>
+                                {/* Play overlay on hover */}
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/40">
+                                  <svg
+                                    className="h-8 w-8 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                                    fill="currentColor"
+                                    viewBox="0 0 24 24"
+                                  >
+                                    <path d="M8 5v14l11-7z" />
+                                  </svg>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Section Title */}
+                          <div className="flex-1 border-b border-gray-100 pb-3">
+                            <h2 className="text-lg font-bold text-gray-900">{section.title}</h2>
+                            {matchedChapter && matchedChapter.title !== section.title && (
+                              <p className="mt-1 text-xs text-gray-500">
+                                Chapter: {matchedChapter.title}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Section Content with Interactive Comments */}
+                        <p className="text-sm leading-relaxed text-gray-700">
+                          {section.content?.map((item, itemIndex) => {
+                            const commentKey = `${section.id}-${itemIndex}`;
+                            const commentCount = sentenceCommentCounts.get(commentKey) || 0;
+                            const isSelected =
+                              selectedSentence?.sectionId === section.id &&
+                              selectedSentence?.sentenceIndex === itemIndex;
+                            const hasNote = notes.some(
+                              (n) => n.sectionId === section.id && n.sentenceIndex === itemIndex,
+                            );
+
+                            return (
+                              <span key={itemIndex}>
+                                <SentenceWithComments
+                                  videoId={videoId || ""}
+                                  sectionId={section.id}
+                                  sentenceIndex={itemIndex}
+                                  content={item.content}
+                                  timestampStart={item.timestampStart}
+                                  commentCount={commentCount}
+                                  hasNote={hasNote}
+                                  isSelected={isSelected}
+                                  onTimestampClick={jumpToTimestamp}
+                                  onSentenceSelect={handleSentenceSelect}
+                                  onDoubleClick={handleSentenceDoubleClick}
+                                />
+                                {itemIndex < (section.content?.length || 0) - 1 && " "}
+                              </span>
+                            );
+                          })}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -938,18 +1783,54 @@ export default function Result() {
             {/* Video Player */}
             <div className="sticky top-20 overflow-visible rounded-lg border bg-white">
               <div className="aspect-video bg-black">
-                <div id="youtube-player" className="h-full w-full"></div>
+                {!videoId ? (
+                  // 流式分析中，videoId 尚未获取
+                  <div className="flex h-full w-full items-center justify-center bg-gray-900">
+                    <div className="text-center">
+                      <svg
+                        className="mx-auto h-12 w-12 animate-pulse text-gray-600"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={1.5}
+                          d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+                        />
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={1.5}
+                          d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      </svg>
+                      <p className="mt-2 text-sm text-gray-500">正在加载视频...</p>
+                    </div>
+                  </div>
+                ) : isExtension ? (
+                  <iframe
+                    ref={youtubeIframeRef}
+                    src={`https://www.youtube.com/embed/${videoId}?modestbranding=1&rel=0${youtubeStartTime > 0 ? `&start=${Math.floor(youtubeStartTime)}&autoplay=1` : ""}`}
+                    className="h-full w-full border-0"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowFullScreen
+                  />
+                ) : (
+                  <div id="youtube-player" className="h-full w-full"></div>
+                )}
               </div>
 
               {/* Chapter/Show Toggle */}
-              <div className="flex items-center gap-2 border-b p-3 text-sm">
+              {/* <div className="flex items-center gap-2 border-b p-3 text-sm">
                 <button className="rounded bg-gray-900 px-3 py-1.5 font-medium text-white">
                   Chapter
                 </button>
                 <button className="rounded px-3 py-1.5 font-medium text-gray-700 transition-colors hover:bg-gray-100">
                   Show
                 </button>
-              </div>
+              </div> */}
 
               {/* Tab Headers */}
               <div className="relative z-30 flex items-center border-b">
@@ -963,168 +1844,6 @@ export default function Result() {
                 >
                   Transcript
                 </button>
-                <div
-                  className={`language-selector relative py-4 transition-colors ${
-                    activeTab === "transcript" ? "border-b-2 border-gray-900" : ""
-                  }`}
-                >
-                  <button
-                    onClick={() => setShowLanguageMenu(!showLanguageMenu)}
-                    className={`flex items-center rounded text-xs transition-colors hover:bg-gray-100 ${
-                      activeTab === "transcript"
-                        ? "text-gray-900"
-                        : "text-gray-600 hover:text-gray-900"
-                    }`}
-                    title="Select Language"
-                  >
-                    {/* <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
-                      </svg> */}
-                    {/* <span className="text-xs">
-                        {selectedLanguage === 'en' && 'EN'}
-                        {selectedLanguage === 'zh' && '中文'}
-                        {selectedLanguage === 'ja' && '日本語'}
-                        {selectedLanguage === 'es' && 'ES'}
-                      </span> */}
-                    <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 9l-7 7-7-7"
-                      />
-                    </svg>
-                  </button>
-
-                  {/* Language Menu */}
-                  {showLanguageMenu && (
-                    <div className="absolute top-full right-0 z-[100] mt-1 w-48 rounded-md border bg-white shadow-lg">
-                      <button
-                        onClick={() => handleLanguageChange("en")}
-                        className={`flex w-full items-center justify-between px-4 py-2 text-left text-xs transition-colors hover:bg-gray-100 ${
-                          selectedLanguage === "en" ? "bg-blue-50 text-blue-700" : ""
-                        }`}
-                      >
-                        <span>English</span>
-                        {selectedLanguage === "en" && (
-                          <svg
-                            className="h-4 w-4 text-blue-600"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                        )}
-                      </button>
-                      <button
-                        onClick={() => handleLanguageChange("zh")}
-                        className={`flex w-full items-center justify-between px-4 py-2 text-left text-xs transition-colors hover:bg-gray-100 ${
-                          selectedLanguage === "zh" ? "bg-blue-50 text-blue-700" : ""
-                        }`}
-                      >
-                        <div>
-                          <div>简体中文</div>
-                          <div className="text-gray-400">Simplified Chinese</div>
-                        </div>
-                        {selectedLanguage === "zh" && (
-                          <svg
-                            className="h-4 w-4 text-blue-600"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                        )}
-                      </button>
-                      <button
-                        onClick={() => handleLanguageChange("ja")}
-                        className={`flex w-full items-center justify-between px-4 py-2 text-left text-xs transition-colors hover:bg-gray-100 ${
-                          selectedLanguage === "ja" ? "bg-blue-50 text-blue-700" : ""
-                        }`}
-                      >
-                        <div>
-                          <div>日本語</div>
-                          <div className="text-gray-400">Japanese</div>
-                        </div>
-                        {selectedLanguage === "ja" && (
-                          <svg
-                            className="h-4 w-4 text-blue-600"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                        )}
-                      </button>
-                      <button
-                        onClick={() => handleLanguageChange("es")}
-                        className={`flex w-full items-center justify-between px-4 py-2 text-left text-xs transition-colors hover:bg-gray-100 ${
-                          selectedLanguage === "es" ? "bg-blue-50 text-blue-700" : ""
-                        }`}
-                      >
-                        <div>
-                          <div>Español</div>
-                          <div className="text-gray-400">Spanish</div>
-                        </div>
-                        {selectedLanguage === "es" && (
-                          <svg
-                            className="h-4 w-4 text-blue-600"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Translating indicator */}
-                  {isTranslating && (
-                    <div className="absolute -top-1 -right-1">
-                      <svg
-                        className="h-3 w-3 animate-spin text-blue-500"
-                        xmlns="http://www.w3.org/2000/svg"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                      >
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                        ></circle>
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        ></path>
-                      </svg>
-                    </div>
-                  )}
-                </div>
-
-                {/* Language Selector - Only show when Transcript tab is active */}
-                {activeTab === "transcript"}
-
                 <button
                   onClick={() => setActiveTab("chat")}
                   className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
@@ -1136,16 +1855,6 @@ export default function Result() {
                   Chat
                 </button>
                 <button
-                  onClick={() => setActiveTab("comments")}
-                  className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-                    activeTab === "comments"
-                      ? "border-b-2 border-gray-900 text-gray-900"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  Comments
-                </button>
-                <button
                   onClick={() => setActiveTab("notes")}
                   className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
                     activeTab === "notes"
@@ -1153,7 +1862,12 @@ export default function Result() {
                       : "text-gray-600 hover:text-gray-900"
                   }`}
                 >
-                  Notes
+                  Notes{" "}
+                  {notes.length > 0 && (
+                    <span className="ml-1 rounded-full bg-yellow-400 px-1.5 text-[10px] text-yellow-900">
+                      {notes.length}
+                    </span>
+                  )}
                 </button>
               </div>
 
@@ -1163,65 +1877,22 @@ export default function Result() {
                 {activeTab === "transcript" && (
                   <div className="space-y-3 p-4">
                     {transcriptData.length > 0 ? (
-                      transcriptData.map((item, index) => {
-                        const translatedItem = translatedData[index];
-                        const hasTranslation =
-                          selectedLanguage !== "en" && translatedItem?.translated;
-
-                        return (
-                          <div
-                            key={index}
-                            ref={(el) => {
-                              transcriptRefs.current[index] = el;
-                            }}
-                            className={`cursor-pointer rounded-sm px-3 py-2 transition-all ${
-                              currentTranscriptIndex === index
-                                ? "bg-yellow-200 font-medium text-gray-900"
-                                : "bg-white hover:bg-blue-50"
-                            }`}
-                            title={item.timestamp}
-                          >
-                            {/* 原文 */}
-                            <div className="text-xs leading-relaxed text-gray-700">{item.text}</div>
-
-                            {/* 译文（如果存在） */}
-                            {hasTranslation && (
-                              <div className="mt-1.5 border-t border-gray-200 pt-1.5 text-[11px] leading-relaxed text-gray-500">
-                                {translatedItem.translated}
-                              </div>
-                            )}
-
-                            {/* 翻译中提示 */}
-                            {isTranslating &&
-                              selectedLanguage !== "en" &&
-                              !translatedItem?.translated && (
-                                <div className="mt-1 flex items-center gap-1 text-[11px] text-gray-400">
-                                  <svg
-                                    className="h-3 w-3 animate-spin"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <circle
-                                      className="opacity-25"
-                                      cx="12"
-                                      cy="12"
-                                      r="10"
-                                      stroke="currentColor"
-                                      strokeWidth="4"
-                                    ></circle>
-                                    <path
-                                      className="opacity-75"
-                                      fill="currentColor"
-                                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                                    ></path>
-                                  </svg>
-                                  <span>Translating...</span>
-                                </div>
-                              )}
-                          </div>
-                        );
-                      })
+                      transcriptData.map((item, index) => (
+                        <div
+                          key={index}
+                          ref={(el) => {
+                            transcriptRefs.current[index] = el;
+                          }}
+                          className={`cursor-pointer rounded-sm px-3 py-2 transition-all ${
+                            currentTranscriptIndex === index
+                              ? "bg-yellow-200 font-medium text-gray-900"
+                              : "bg-white hover:bg-blue-50"
+                          }`}
+                          title={item.timestamp}
+                        >
+                          <div className="text-xs leading-relaxed text-gray-700">{item.text}</div>
+                        </div>
+                      ))
                     ) : (
                       <p className="py-8 text-center text-xs text-gray-500">
                         Loading transcript...
@@ -1381,141 +2052,147 @@ export default function Result() {
                   </div>
                 )}
 
-                {/* Comments Tab */}
-                {activeTab === "comments" && (
-                  <div className="p-4">
-                    {/* 加载状态 */}
-                    {commentsLoading && (
-                      <div className="flex items-center justify-center py-8">
-                        <div className="flex items-center gap-2 text-xs text-gray-500">
-                          <svg
-                            className="h-4 w-4 animate-spin"
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                          >
-                            <circle
-                              className="opacity-25"
-                              cx="12"
-                              cy="12"
-                              r="10"
-                              stroke="currentColor"
-                              strokeWidth="4"
-                            ></circle>
-                            <path
-                              className="opacity-75"
-                              fill="currentColor"
-                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                            ></path>
-                          </svg>
-                          <span>Loading comments...</span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* 错误状态 */}
-                    {!commentsLoading && commentsError && (
-                      <div className="py-8 text-center text-xs">
-                        <div className="mb-2 text-red-500">⚠️ {commentsError}</div>
-                        <button
-                          onClick={() => videoId && loadComments(videoId)}
-                          className="text-blue-600 underline hover:text-blue-700"
-                        >
-                          Retry
-                        </button>
-                      </div>
-                    )}
-
-                    {/* 评论列表 */}
-                    {!commentsLoading && !commentsError && comments.length > 0 && (
-                      <div className="space-y-4">
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-xs font-medium text-gray-600">
-                            {comments.length} Comments
-                          </span>
-                          <button
-                            onClick={() => videoId && loadComments(videoId, 50)}
-                            disabled={commentsLoading}
-                            className="text-xs text-blue-600 hover:text-blue-700 disabled:text-gray-400"
-                          >
-                            Load More
-                          </button>
-                        </div>
-
-                        {comments.map((comment, index) => (
-                          <div key={index} className="border-b border-gray-100 pb-3 last:border-0">
-                            {/* 评论作者和时间 */}
-                            <div className="mb-1.5 flex items-start gap-2">
-                              {comment.avatar && (
-                                <img
-                                  src={comment.avatar}
-                                  alt={comment.author || "User"}
-                                  className="h-7 w-7 flex-shrink-0 rounded-full"
-                                />
-                              )}
-                              <div className="min-w-0 flex-1">
-                                <div className="mb-1 flex items-baseline gap-2">
-                                  <span className="truncate text-xs font-medium text-gray-900">
-                                    {comment.author || "Unknown User"}
-                                  </span>
-                                  <span className="flex-shrink-0 text-[10px] text-gray-500">
-                                    {comment.published_at
-                                      ? new Date(comment.published_at).toLocaleDateString()
-                                      : ""}
-                                  </span>
-                                </div>
-
-                                {/* 评论内容 */}
-                                <p className="text-xs leading-relaxed whitespace-pre-wrap text-gray-700">
-                                  {comment.text || ""}
-                                </p>
-
-                                {/* 点赞数 */}
-                                {comment.like_count !== undefined && comment.like_count > 0 && (
-                                  <div className="mt-1.5 flex items-center gap-1">
-                                    <svg
-                                      className="h-3 w-3 text-gray-400"
-                                      fill="currentColor"
-                                      viewBox="0 0 20 20"
-                                    >
-                                      <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
-                                    </svg>
-                                    <span className="text-[10px] text-gray-500">
-                                      {comment.like_count}
-                                    </span>
-                                  </div>
-                                )}
-
-                                {/* 回复数 */}
-                                {comment.reply_count !== undefined && comment.reply_count > 0 && (
-                                  <div className="mt-1 text-[10px] text-blue-600">
-                                    {comment.reply_count}{" "}
-                                    {comment.reply_count === 1 ? "reply" : "replies"}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* 无评论状态 */}
-                    {!commentsLoading && !commentsError && comments.length === 0 && (
-                      <div className="py-8 text-center text-xs text-gray-500">
-                        No comments available for this video
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 {/* Notes Tab */}
                 {activeTab === "notes" && (
-                  <div className="p-4">
-                    <textarea
-                      placeholder="Take notes about the video..."
-                      className="h-[350px] w-full resize-none rounded-lg border p-3 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                    />
+                  <div className="flex h-full flex-col">
+                    {/* Note Editor - when editing */}
+                    {editingNote && (
+                      <div className="border-b border-gray-200 bg-yellow-50 p-4">
+                        <div className="mb-2">
+                          <p className="mb-1 text-[10px] font-medium text-gray-500 uppercase">
+                            添加笔记到：
+                          </p>
+                          <p className="line-clamp-2 text-xs text-gray-600 italic">
+                            "{editingNote.content}"
+                          </p>
+                        </div>
+                        <textarea
+                          value={noteInputText}
+                          onChange={(e) => setNoteInputText(e.target.value)}
+                          placeholder="写下你的笔记..."
+                          className="mb-2 h-24 w-full resize-none rounded-lg border border-yellow-300 bg-white p-3 text-xs focus:border-yellow-400 focus:ring-2 focus:ring-yellow-200 focus:outline-none"
+                          autoFocus
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button
+                            onClick={handleCancelNote}
+                            className="rounded px-3 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-100"
+                          >
+                            取消
+                          </button>
+                          <button
+                            onClick={handleSaveNote}
+                            disabled={!noteInputText.trim()}
+                            className="rounded bg-yellow-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-yellow-600 disabled:cursor-not-allowed disabled:bg-gray-300"
+                          >
+                            保存笔记
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Notes List */}
+                    <div className="flex-1 overflow-y-auto p-4">
+                      {notes.length === 0 && !editingNote ? (
+                        <div className="py-8 text-center">
+                          <svg
+                            className="mx-auto mb-3 h-12 w-12 text-gray-300"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={1.5}
+                              d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                            />
+                          </svg>
+                          <p className="text-sm font-medium text-gray-600">暂无笔记</p>
+                          <p className="mt-1 text-xs text-gray-400">双击左侧内容可添加笔记</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {notes.map((note) => (
+                            <div
+                              key={note.id}
+                              className="group rounded-lg border border-yellow-200 bg-yellow-50 p-3 transition-colors hover:border-yellow-300"
+                            >
+                              {/* Content preview */}
+                              <p className="mb-2 line-clamp-1 text-[10px] text-gray-500 italic">
+                                "{note.contentPreview}..."
+                              </p>
+
+                              {/* Note text */}
+                              <p className="text-xs leading-relaxed text-gray-800">
+                                {note.noteText}
+                              </p>
+
+                              {/* Footer */}
+                              <div className="mt-2 flex items-center justify-between">
+                                <span className="text-[10px] text-gray-400">
+                                  {note.createdAt.toLocaleDateString()}
+                                </span>
+                                <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                  <button
+                                    onClick={() => {
+                                      // Find the original content
+                                      const section = videoData?.sections?.find(
+                                        (s) => s.id === note.sectionId,
+                                      );
+                                      const content =
+                                        section?.content?.[note.sentenceIndex]?.content ||
+                                        note.contentPreview;
+                                      setEditingNote({
+                                        sectionId: note.sectionId,
+                                        sentenceIndex: note.sentenceIndex,
+                                        content,
+                                      });
+                                      setNoteInputText(note.noteText);
+                                    }}
+                                    className="rounded p-1 text-gray-400 transition-colors hover:bg-yellow-100 hover:text-yellow-600"
+                                    title="编辑"
+                                  >
+                                    <svg
+                                      className="h-3 w-3"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                                      />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteNote(note.id)}
+                                    className="rounded p-1 text-gray-400 transition-colors hover:bg-red-100 hover:text-red-600"
+                                    title="删除"
+                                  >
+                                    <svg
+                                      className="h-3 w-3"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                      />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

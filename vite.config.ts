@@ -15,31 +15,40 @@ import { fonts } from "./configs/fonts.config";
 export default defineConfig({
   server: {
     host: "0.0.0.0",
-    port: 3000,
+    port: 3500,
     proxy: {
       "/api": {
-        target: "http://52.72.117.236:5000",
+        target: "http://52.72.117.236:5500",
         changeOrigin: true,
         secure: false,
-        timeout: 120000, // 2 minutes timeout
-        proxyTimeout: 120000,
-        ws: true, // Enable websocket proxy
+        timeout: 300000, // 5 minutes timeout
+        proxyTimeout: 300000,
+        ws: true,
+        // 防止代理缓冲响应
+        selfHandleResponse: false,
         configure: (proxy, _options) => {
-          proxy.on("error", (err, _req, _res) => {
+          proxy.on("error", (err, _req, res) => {
             console.error("[Proxy] ❌ Error:", err.message);
-            console.error("[Proxy] Error details:", err);
+            // 防止 ECONNRESET 导致 502
+            if (!res.headersSent) {
+              res.writeHead(502, { "Content-Type": "text/plain" });
+              res.end("Proxy error: " + err.message);
+            }
           });
           proxy.on("proxyReq", (proxyReq, req, _res) => {
             console.log("[Proxy] 🔄 Sending request:", req.method, req.url);
-            console.log("[Proxy] 🎯 Target:", "http://52.72.117.236:5000" + req.url);
-            // Set timeout on the request
-            proxyReq.setTimeout(120000);
+            proxyReq.setTimeout(300000);
           });
-          proxy.on("proxyRes", (proxyRes, req, _res) => {
+          proxy.on("proxyRes", (proxyRes, req, res) => {
             console.log("[Proxy] ✅ Response:", proxyRes.statusCode, req.url);
-          });
-          proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
-            console.log("[Proxy] 🔌 WS request:", req.url);
+            // 对于流式响应，禁用缓冲
+            if (
+              req.url?.includes("/stream") ||
+              proxyRes.headers["content-type"]?.includes("event-stream")
+            ) {
+              res.setHeader("X-Accel-Buffering", "no");
+              res.setHeader("Cache-Control", "no-cache");
+            }
           });
         },
       },

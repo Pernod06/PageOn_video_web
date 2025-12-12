@@ -1,5 +1,5 @@
 # docker-compose.yml
-version: '3.8'
+version: "3.8"
 
 services:
   vite-app:
@@ -7,5 +7,6 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "5173:80" # Map Nginx port to localhost port
+      - "3000:80" # Map Nginx port to localhost port
     container_name: vite-react-app
+    restart: unless-stopped
