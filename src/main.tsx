@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, HashRouter, useRoutes } from "react-router";
 import routes from "~react-pages";
+import { AuthProvider } from "@/contexts";
 
 // Use HashRouter for extension builds (no server-side routing)
 const isExtension = import.meta.env.VITE_IS_EXTENSION === "true";
@@ -20,7 +21,9 @@ app.render(
   // Temporarily disable StrictMode to debug data loading issue
   // <StrictMode>
   <Router>
-    <App />
+    <AuthProvider>
+      <App />
+    </AuthProvider>
   </Router>,
   // </StrictMode>,
 );

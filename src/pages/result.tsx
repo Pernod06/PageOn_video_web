@@ -7,6 +7,20 @@ import {
   postComment,
   SentenceComment,
 } from "@/services/commentService";
+import { useAuth } from "@/contexts/AuthContext";
+
+interface ThemeContentItem {
+  content: string;
+  timestampStart: string;
+}
+
+interface Theme {
+  id: string;
+  title: string;
+  description?: string;
+  content: ThemeContentItem[];
+  color?: string; // 前端自动分配颜色
+}
 
 interface VideoData {
   videoInfo?: {
@@ -29,6 +43,7 @@ interface VideoData {
     title: string;
     thumbnail_url?: string;
   }>;
+  themes?: Theme[];
 }
 
 interface YouTubePlayer {
@@ -77,24 +92,58 @@ interface Note {
   createdAt: Date;
 }
 
+const LANGUAGES = [
+  { code: "en", label: "English" },
+  { code: "zh", label: "中文" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "es", label: "Español" },
+  { code: "fr", label: "Français" },
+];
+
+// 时间戳转秒数（工具函数，可以放在组件外）
+const parseTimestampToSeconds = (timestamp: string): number => {
+  const parts = timestamp.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
+};
+
+// 从消息中提取 clips（工具函数）
+const extractClipsFromMessage = (content: string) => {
+  // 匹配格式：[06:45 - 07:05] 或 [1:30:00 - 1:45:30]
+  const timeRangeRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+  const clips: { startTime: number; endTime: number }[] = [];
+  let match;
+  while ((match = timeRangeRegex.exec(content)) !== null) {
+    clips.push({
+      startTime: parseTimestampToSeconds(match[1]), // 捕获组1: 开始时间
+      endTime: parseTimestampToSeconds(match[2]), // 捕获组2: 结束时间
+    });
+  }
+  console.log("[extractClips] Found clips:", clips.length, clips);
+  return clips;
+};
+
 // API配置
 // 开发环境使用相对路径（通过 vite 代理），生产环境使用完整 URL
-const API_BASE_URL = import.meta.env.DEV ? "" : "http://52.72.117.236:5500";
+const API_BASE_URL = import.meta.env.DEV ? "" : "https://52.72.117.236:5500";
 
 // 流式请求直接访问后端，绕过 Vite 代理的缓冲问题
-const STREAM_API_URL = "http://52.72.117.236:5500";
+const STREAM_API_URL = "https://52.72.117.236:5500";
 
 // 检测是否在扩展环境中运行
 const isExtension = import.meta.env.VITE_IS_EXTENSION === "true";
 
 export default function Result() {
   const location = useLocation();
+  const { user } = useAuth(); // 获取当前登录用户
   const {
     videoId: initialVideoId,
     title,
     chapters: initialChapters = [],
     isExample = false,
-    language = "en",
+    language: initialLanguage = "en",
     sections: initialSections = null,
     videoInfo: initialVideoInfo = null,
     cached = false,
@@ -113,6 +162,11 @@ export default function Result() {
 
   // 如果有 streamingUrl，videoId 从流式分析中获取
   const [videoId, setVideoId] = useState<string | undefined>(initialVideoId);
+
+  // 语言选择状态
+  const [language, setLanguage] = useState<string>(initialLanguage);
+  const [showLangMenu, setShowLangMenu] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
 
   const [videoData, setVideoData] = useState<VideoData | null>(null);
   const [, setLoading] = useState(true);
@@ -156,6 +210,19 @@ export default function Result() {
   const [, setCommentsError] = useState<string | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>(initialChapters);
 
+  // Theme 相关状态
+  const [themes, setThemes] = useState<Theme[]>([]);
+  const [isLoadingThemes, setIsLoadingThemes] = useState(false);
+  const [activeThemeId, setActiveThemeId] = useState<string | null>(null); // null = 显示主 sections
+  const [themesGenerated, setThemesGenerated] = useState(false); // 是否已生成过 themes
+
+  // Clip 播放列表状态
+  const [clipPlaylist, setClipPlaylist] = useState<{
+    clips: { startTime: number; endTime: number }[];
+    currentIndex: number;
+    isPlaying: boolean;
+  } | null>(null);
+
   // Sentence comments state
   const [sentenceCommentCounts, setSentenceCommentCounts] = useState<Map<string, number>>(
     new Map(),
@@ -173,6 +240,7 @@ export default function Result() {
   const [newSidebarComment, setNewSidebarComment] = useState("");
   const [sidebarAuthorName, setSidebarAuthorName] = useState("");
   const [isSubmittingSidebarComment, setIsSubmittingSidebarComment] = useState(false);
+  const [isCommentsExpanded, setIsCommentsExpanded] = useState(true);
 
   // Notes state
   const [notes, setNotes] = useState<Note[]>([]);
@@ -387,7 +455,11 @@ export default function Result() {
             "Cache-Control": "no-cache",
           },
           cache: "no-store",
-          body: JSON.stringify({ url, language }),
+          body: JSON.stringify({
+            url,
+            language,
+            user_id: user?.id || null, // 传递用户ID用于记录使用次数
+          }),
           signal: abortControllerRef.current.signal,
         });
 
@@ -429,6 +501,7 @@ export default function Result() {
                   }
                   setIsStreaming(false);
                   setLoading(false);
+                  // 使用次数已在后端记录
                 } catch (e) {
                   console.error("[Result] Failed to parse DONE/CACHED JSON:", e);
                   setIsStreaming(false);
@@ -526,7 +599,7 @@ export default function Result() {
         setLoading(false);
       } else {
         // Load all data - 示例视频优先使用本地缓存
-        loadVideoData(videoId, isExample);
+        loadVideoData(videoId, isExample, language);
       }
 
       loadTranscript(videoId, isExample);
@@ -558,6 +631,78 @@ export default function Result() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoId, isStreaming, streamingUrl]);
 
+  // 处理语言切换
+  const handleLanguageChange = async (newLanguage: string) => {
+    if (newLanguage === language || !videoId) {
+      setShowLangMenu(false);
+      return;
+    }
+
+    setIsTranslating(true);
+    setShowLangMenu(false);
+    setLanguage(newLanguage);
+
+    try {
+      // 重新加载视频数据（翻译版本）
+      console.log("[Result] 🌐 Language change: loading translated data for:", newLanguage);
+      await loadVideoData(videoId, false, newLanguage);
+      console.log(
+        "[Result] 🌐 Language change: data loaded, current videoData title:",
+        videoData?.videoInfo?.title,
+      );
+
+      // 翻译现有的 themes（如果有的话）
+      if (themes.length > 0) {
+        console.log("[Result] Translating themes to:", newLanguage);
+        const response = await fetch(`${STREAM_API_URL}/api/translate-themes`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            themes: themes.map((t) => ({ ...t, color: undefined })), // 移除 color 避免翻译
+            language: newLanguage,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.themes) {
+            // 恢复颜色
+            const translatedThemes = data.themes.map((t: Theme, index: number) => ({
+              ...t,
+              color: themes[index]?.color || THEME_COLORS[index % THEME_COLORS.length],
+            }));
+            setThemes(translatedThemes);
+            console.log("[Result] ✅ Translated", translatedThemes.length, "themes");
+          }
+        }
+      }
+    } catch (error) {
+      console.error("[Result] Failed to translate content:", error);
+      setError("翻译失败，请重试");
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  // 点击外部关闭语言菜单
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (showLangMenu && !target.closest(".language-selector")) {
+        setShowLangMenu(false);
+      }
+    };
+
+    if (showLangMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => {
+        document.removeEventListener("mousedown", handleClickOutside);
+      };
+    }
+  }, [showLangMenu]);
+
   // Load comment counts when video data is ready
   useEffect(() => {
     const loadCommentCounts = async () => {
@@ -571,6 +716,49 @@ export default function Result() {
 
     loadCommentCounts();
   }, [videoId, videoData?.sections]);
+
+  // Clip 播放列表监听器：自动切换到下一个 clip
+  useEffect(() => {
+    if (!clipPlaylist || !clipPlaylist.isPlaying || !player || !playerReady) return;
+
+    const checkProgress = setInterval(() => {
+      try {
+        const currentTime = player.getCurrentTime();
+        const currentClip = clipPlaylist.clips[clipPlaylist.currentIndex];
+
+        // 如果当前时间超过了当前 clip 的结束时间
+        if (currentTime >= currentClip.endTime - 0.5) {
+          const nextIndex = clipPlaylist.currentIndex + 1;
+
+          if (nextIndex < clipPlaylist.clips.length) {
+            // 跳转到下一个 clip
+            console.log("[Clips] Playing clip", nextIndex + 1, "/", clipPlaylist.clips.length);
+
+            const nextClip = clipPlaylist.clips[nextIndex];
+            // 先跳转视频，再更新状态
+            if (player.seekTo) {
+              player.seekTo(nextClip.startTime, true);
+              player.playVideo();
+            }
+
+            // 使用 setTimeout 延迟状态更新，避免 React 渲染冲突
+            setTimeout(() => {
+              setClipPlaylist((prev) => (prev ? { ...prev, currentIndex: nextIndex } : null));
+            }, 50);
+          } else {
+            // 所有 clips 播放完毕
+            console.log("[Clips] Playback complete");
+            setClipPlaylist((prev) => (prev ? { ...prev, isPlaying: false } : null));
+          }
+        }
+      } catch {
+        // player 可能还没准备好
+      }
+    }, 500);
+
+    return () => clearInterval(checkProgress);
+     
+  }, [clipPlaylist, player, playerReady]);
 
   // Load sidebar comments when selected sentence changes
   useEffect(() => {
@@ -1074,14 +1262,70 @@ export default function Result() {
   // 时间跳转通过更新 youtubeStartTime state 实现
 
   const parseMessageWithTimestamp = (content: string) => {
-    // 匹配[MM:SS] 或者 [HH:MM:SS] 的格式
-    const timestampRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
-    const parts = [];
-    let lastIndex = 0;
-    let match;
+    // 匹配多种时间戳格式:
+    // 1. 📎 [06:45 - 07:05] 时间范围格式
+    // 2. [MM:SS] 或 [HH:MM:SS] 单个时间戳格式
+    const timeRangeRegex = /📎?\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    const singleTimestampRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
 
-    while ((match = timestampRegex.exec(content)) !== null) {
-      // 添加时间戳之前的文本
+    const parts: Array<{
+      type: "text" | "timestamp" | "timeRange";
+      content: string;
+      startTime?: string;
+      endTime?: string;
+      fullMatch?: string;
+    }> = [];
+
+    // 先处理时间范围格式
+    const rangeMatches: Array<{
+      index: number;
+      length: number;
+      startTime: string;
+      endTime: string;
+      fullMatch: string;
+    }> = [];
+    let rangeMatch;
+
+    while ((rangeMatch = timeRangeRegex.exec(content)) !== null) {
+      rangeMatches.push({
+        index: rangeMatch.index,
+        length: rangeMatch[0].length,
+        startTime: rangeMatch[1],
+        endTime: rangeMatch[2],
+        fullMatch: rangeMatch[0],
+      });
+    }
+
+    // 处理单个时间戳（排除已经在时间范围中的）
+    const singleMatches: Array<{ index: number; length: number; time: string; fullMatch: string }> =
+      [];
+    let singleMatch;
+
+    while ((singleMatch = singleTimestampRegex.exec(content)) !== null) {
+      // 检查是否在时间范围内
+      const isInRange = rangeMatches.some(
+        (r) => singleMatch!.index >= r.index && singleMatch!.index < r.index + r.length,
+      );
+      if (!isInRange) {
+        singleMatches.push({
+          index: singleMatch.index,
+          length: singleMatch[0].length,
+          time: singleMatch[1],
+          fullMatch: singleMatch[0],
+        });
+      }
+    }
+
+    // 合并并排序所有匹配
+    const allMatches = [
+      ...rangeMatches.map((m) => ({ ...m, type: "timeRange" as const })),
+      ...singleMatches.map((m) => ({ ...m, type: "timestamp" as const })),
+    ].sort((a, b) => a.index - b.index);
+
+    let lastIndex = 0;
+
+    for (const match of allMatches) {
+      // 添加匹配之前的文本
       if (match.index > lastIndex) {
         parts.push({
           type: "text",
@@ -1089,14 +1333,23 @@ export default function Result() {
         });
       }
 
-      // 添加时间戳
-      parts.push({
-        type: "timestamp",
-        content: match[1],
-        fullMatch: match[0],
-      });
+      if (match.type === "timeRange") {
+        parts.push({
+          type: "timeRange",
+          content: `${match.startTime} - ${match.endTime}`,
+          startTime: match.startTime,
+          endTime: match.endTime,
+          fullMatch: match.fullMatch,
+        });
+      } else {
+        parts.push({
+          type: "timestamp",
+          content: match.time,
+          fullMatch: match.fullMatch,
+        });
+      }
 
-      lastIndex = match.index + match[0].length;
+      lastIndex = match.index + match.length;
     }
 
     // 添加剩余文本
@@ -1140,13 +1393,41 @@ export default function Result() {
     }
   };
 
-  const loadVideoData = async (id: string, useLocalCache: boolean = false) => {
+  // 开始播放 clips 列表
+  const startClipPlayback = (clips: { startTime: number; endTime: number }[]) => {
+    if (clips.length === 0) return;
+
+    console.log("[Clips] Starting playback with", clips.length, "clips");
+    setClipPlaylist({ clips, currentIndex: 0, isPlaying: true });
+
+    // 跳转到第一个 clip - 直接使用 player API 避免状态更新冲突
+    const startTime = clips[0].startTime;
+    if (player && playerReady && player.seekTo) {
+      console.log("[Clips] Seeking to", startTime, "seconds");
+      player.seekTo(startTime, true);
+      player.playVideo();
+    }
+  };
+
+  const loadVideoData = async (
+    id: string,
+    useLocalCache: boolean = false,
+    targetLanguage?: string,
+  ) => {
     try {
-      console.log("[Result] Loading video data for:", id, "useLocalCache:", useLocalCache);
+      const langToUse = targetLanguage || language;
+      console.log(
+        "[Result] Loading video data for:",
+        id,
+        "useLocalCache:",
+        useLocalCache,
+        "language:",
+        langToUse,
+      );
       setError(null);
 
-      // 如果是示例视频，优先使用本地缓存
-      if (useLocalCache) {
+      // 如果是示例视频，优先使用本地缓存（但翻译时强制从 API 加载）
+      if (useLocalCache && (!targetLanguage || targetLanguage === "en")) {
         console.log("[Result] 📂 Loading from local cache for example video");
         try {
           const localResponse = await fetch(`/data/json/video-data-${id}.json`);
@@ -1171,10 +1452,10 @@ export default function Result() {
       try {
         // 构建 URL，如果有非英文语言则添加 language 参数
         let url = `${API_BASE_URL}/api/videos/${id}`;
-        if (language && language !== "en") {
-          url += `?language=${language}`;
+        if (langToUse && langToUse !== "en") {
+          url += `?language=${langToUse}`;
         }
-        console.log("[Result] 🔍 Fetching from:", url, "language:", language);
+        console.log("[Result] 🔍 Fetching from:", url, "language:", langToUse);
         const response = await fetch(url, {
           headers: {
             Accept: "application/json",
@@ -1190,6 +1471,8 @@ export default function Result() {
 
         const data = await response.json();
         console.log("[Result] ✅ Video data loaded successfully");
+        console.log("[Result] 📝 Video title:", data?.videoInfo?.title);
+        console.log("[Result] 📝 First section title:", data?.sections?.[0]?.title);
         setVideoData(data);
         return;
       } catch (fetchError) {
@@ -1218,6 +1501,56 @@ export default function Result() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Theme 颜色配置
+  const THEME_COLORS = [
+    "#6366f1", // indigo
+    "#8b5cf6", // violet
+    "#ec4899", // pink
+    "#f59e0b", // amber
+    "#10b981", // emerald
+    "#3b82f6", // blue
+    "#ef4444", // red
+    "#14b8a6", // teal
+  ];
+
+  // 获取 themes（根据当前语言生成）
+  const loadThemes = async (id: string, targetLanguage?: string) => {
+    if (themesGenerated || isLoadingThemes) return;
+
+    const lang = targetLanguage || language;
+    console.log("[Result] Loading themes for:", id, "language:", lang);
+    setIsLoadingThemes(true);
+
+    try {
+      // 传递语言参数给后端
+      const response = await fetch(`${STREAM_API_URL}/api/generate-themes/${id}?language=${lang}`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to generate themes: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log("[Result] Themes response:", data);
+
+      if (data.success && data.themes) {
+        // 为每个 theme 分配颜色
+        const themesWithColors = data.themes.map((theme: Theme, index: number) => ({
+          ...theme,
+          color: THEME_COLORS[index % THEME_COLORS.length],
+        }));
+        setThemes(themesWithColors);
+        setThemesGenerated(true);
+        console.log("[Result] ✅ Loaded", themesWithColors.length, "themes");
+      }
+    } catch (error) {
+      console.error("[Result] ❌ Failed to load themes:", error);
+    } finally {
+      setIsLoadingThemes(false);
     }
   };
 
@@ -1277,6 +1610,16 @@ export default function Result() {
 
       if (data.success) {
         setChatMessages((prev) => [...prev, { type: "bot", content: data.response }]);
+
+        // 自动播放 clips：提取响应中的时间片段并自动播放
+        // 使用 setTimeout 确保 React 渲染完成后再开始播放，避免 DOM 冲突
+        const clips = extractClipsFromMessage(data.response);
+        if (clips.length > 0) {
+          console.log("[Chat] Found", clips.length, "clips, scheduling auto-playback...");
+          setTimeout(() => {
+            startClipPlayback(clips);
+          }, 100);
+        }
       }
     } catch (error) {
       console.error("Chat error:", error);
@@ -1371,22 +1714,93 @@ export default function Result() {
             </svg>
             <span className="font-medium">Back</span>
           </Link>
-          <Button onClick={downloadPDF} variant="outline" className="flex items-center gap-2">
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            Export PDF
-          </Button>
+          <div className="flex items-center gap-3">
+            {/* Language Selector */}
+            <div className="language-selector relative">
+              <button
+                onClick={() => setShowLangMenu(!showLangMenu)}
+                disabled={isTranslating || isStreaming}
+                className="flex h-10 items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 transition-all duration-200 hover:border-blue-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"
+                  />
+                </svg>
+                <span>{LANGUAGES.find((l) => l.code === language)?.label}</span>
+                {isTranslating ? (
+                  <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24">
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      fill="none"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    />
+                  </svg>
+                ) : (
+                  <svg
+                    className={`h-3 w-3 transition-transform ${showLangMenu ? "rotate-180" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 9l-7 7-7-7"
+                    />
+                  </svg>
+                )}
+              </button>
+
+              {showLangMenu && (
+                <div className="absolute right-0 z-10 mt-2 w-36 rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                  {LANGUAGES.map((lang) => (
+                    <button
+                      key={lang.code}
+                      onClick={() => handleLanguageChange(lang.code)}
+                      disabled={isTranslating}
+                      className={`flex w-full items-center px-4 py-2 text-left text-sm transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 ${
+                        language === lang.code
+                          ? "bg-blue-50 font-medium text-blue-600"
+                          : "text-gray-700"
+                      }`}
+                    >
+                      {lang.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <Button onClick={downloadPDF} variant="outline" className="flex items-center gap-2">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                />
+              </svg>
+              Export PDF
+            </Button>
+          </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <div className="mx-auto max-w-[1400px] px-6 py-6">
+      <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="flex gap-6">
           {/* Left Sidebar - Navigation & Comments */}
           <div className="w-[240px] flex-shrink-0">
@@ -1394,7 +1808,7 @@ export default function Result() {
               {/* Table of Contents */}
               <div className="rounded-lg border bg-white p-4">
                 <div className="mb-3 text-xs font-medium tracking-wide text-gray-500 uppercase">
-                  目录
+                  Main Table of Contents
                 </div>
                 <nav className="space-y-1">
                   {videoData?.sections?.map((section, index) => (
@@ -1413,139 +1827,85 @@ export default function Result() {
                 </nav>
               </div>
 
-              {/* Comments Panel - Feishu style */}
-              <div className="rounded-lg border bg-white">
-                <div className="border-b border-gray-100 px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <svg
-                      className="h-4 w-4 text-gray-500"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
+              {/* Theme Table */}
+              <div className="rounded-lg border bg-white p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-xs font-medium tracking-wide text-gray-500 uppercase">
+                    Theme Table
+                  </span>
+                  {/* 返回主内容按钮
+                  {activeThemeId && (
+                    <button
+                      onClick={() => setActiveThemeId(null)}
+                      className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-blue-600 transition-colors hover:bg-blue-50"
                     >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-                      />
-                    </svg>
-                    <span className="text-xs font-medium text-gray-700">评论</span>
-                  </div>
+                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                      </svg>
+                      Back
+                    </button>
+                  )} */}
                 </div>
-
-                {!selectedSentence ? (
-                  <div className="px-4 py-8 text-center">
-                    <svg
-                      className="mx-auto mb-2 h-8 w-8 text-gray-300"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={1.5}
-                        d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"
-                      />
-                    </svg>
-                    <p className="text-xs text-gray-500">悬停在句子上</p>
-                    <p className="text-xs text-gray-400">查看或添加评论</p>
-                  </div>
-                ) : (
-                  <>
-                    {/* Selected sentence preview */}
-                    <div className="border-b border-gray-100 bg-amber-50 px-4 py-2">
-                      <p className="line-clamp-2 text-xs text-amber-800">
-                        "{selectedSentence.content}"
-                      </p>
+                <div className="space-y-1">
+                  {themes.length > 0 ? (
+                    themes.map((theme) => (
                       <button
-                        onClick={() => setSelectedSentence(null)}
-                        className="mt-1 text-[10px] text-amber-600 hover:text-amber-700"
+                        key={theme.id}
+                        onClick={() =>
+                          setActiveThemeId(activeThemeId === theme.id ? null : theme.id)
+                        }
+                        className={`group flex w-full items-start gap-2 rounded px-2 py-2 text-left transition-all ${
+                          activeThemeId === theme.id
+                            ? "bg-blue-50 ring-1 ring-blue-200"
+                            : "hover:bg-gray-50"
+                        }`}
                       >
-                        取消选择
-                      </button>
-                    </div>
-
-                    {/* Comments list */}
-                    <div className="max-h-[280px] overflow-y-auto">
-                      {sidebarCommentsLoading ? (
-                        <div className="flex items-center justify-center py-6">
-                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></div>
-                        </div>
-                      ) : sidebarComments.length === 0 ? (
-                        <div className="px-4 py-6 text-center">
-                          <p className="text-xs text-gray-500">暂无评论</p>
-                          <p className="text-xs text-gray-400">成为第一个评论者！</p>
-                        </div>
-                      ) : (
-                        <div className="divide-y divide-gray-50">
-                          {sidebarComments.map((comment) => (
-                            <div key={comment.id} className="px-4 py-3">
-                              <div className="flex gap-2">
-                                {comment.avatar && (
-                                  <img
-                                    src={comment.avatar}
-                                    alt={comment.author}
-                                    className="h-5 w-5 flex-shrink-0 rounded-full bg-gray-100"
-                                  />
-                                )}
-                                <div className="min-w-0 flex-1">
-                                  <div className="mb-1 flex items-baseline gap-1">
-                                    <span className="text-[11px] font-medium text-gray-900">
-                                      {comment.author}
-                                    </span>
-                                    {comment.is_ai_generated && (
-                                      <span className="rounded bg-purple-100 px-1 py-0.5 text-[8px] font-medium text-purple-600">
-                                        AI
-                                      </span>
-                                    )}
-                                  </div>
-                                  <p className="text-[11px] leading-relaxed text-gray-700">
-                                    {comment.comment_text}
-                                  </p>
-                                  <span className="text-[9px] text-gray-400">
-                                    {new Date(comment.created_at).toLocaleDateString()}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Add comment form */}
-                    <form
-                      onSubmit={handleSubmitSidebarComment}
-                      className="border-t border-gray-100 p-3"
-                    >
-                      <input
-                        type="text"
-                        placeholder="你的名字（可选）"
-                        value={sidebarAuthorName}
-                        onChange={(e) => setSidebarAuthorName(e.target.value)}
-                        className="mb-2 w-full rounded border border-gray-200 px-2 py-1 text-[11px] focus:border-blue-400 focus:outline-none"
-                      />
-                      <div className="flex gap-1">
-                        <input
-                          type="text"
-                          placeholder="添加评论..."
-                          value={newSidebarComment}
-                          onChange={(e) => setNewSidebarComment(e.target.value)}
-                          className="flex-1 rounded border border-gray-200 px-2 py-1.5 text-[11px] focus:border-blue-400 focus:outline-none"
-                          disabled={isSubmittingSidebarComment}
+                        <span
+                          className="mt-1 h-2 w-2 flex-shrink-0 rounded-full"
+                          style={{ backgroundColor: theme.color || "#6366f1" }}
                         />
-                        <button
-                          type="submit"
-                          disabled={!newSidebarComment.trim() || isSubmittingSidebarComment}
-                          className="rounded bg-blue-600 px-2 py-1.5 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
-                        >
-                          {isSubmittingSidebarComment ? (
-                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
-                          ) : (
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className={`truncate text-xs font-medium ${
+                              activeThemeId === theme.id ? "text-blue-700" : "text-gray-800"
+                            }`}
+                            title={theme.title}
+                          >
+                            {theme.title}
+                          </p>
+                          {theme.description && (
+                            <p className="mt-0.5 line-clamp-2 text-[10px] text-gray-500">
+                              {theme.description}
+                            </p>
+                          )}
+                          <p className="mt-1 text-[10px] text-gray-400">
+                            {theme.content?.length || 0} Key Points
+                          </p>
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs text-gray-400">
+                        {isStreaming
+                          ? "Analyzing..."
+                          : isLoadingThemes
+                            ? "Generating themes..."
+                            : "No themes"}
+                      </p>
+                      {/* 生成主题按钮 */}
+                      {!isStreaming &&
+                        !isLoadingThemes &&
+                        !themesGenerated &&
+                        videoId &&
+                        videoData?.sections &&
+                        videoData.sections.length > 0 && (
+                          <button
+                            onClick={() => loadThemes(videoId)}
+                            className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-gray-300 py-2 text-xs text-gray-500 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600"
+                          >
                             <svg
-                              className="h-3 w-3"
+                              className="h-4 w-4"
                               fill="none"
                               stroke="currentColor"
                               viewBox="0 0 24 24"
@@ -1554,15 +1914,21 @@ export default function Result() {
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
                                 strokeWidth={2}
-                                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                                d="M13 10V3L4 14h7v7l9-11h-7z"
                               />
                             </svg>
-                          )}
-                        </button>
-                      </div>
-                    </form>
-                  </>
-                )}
+                            Find Themes
+                          </button>
+                        )}
+                      {isLoadingThemes && (
+                        <div className="flex items-center justify-center gap-2 py-2">
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></div>
+                          <span className="text-xs text-gray-500">AI Analyzing...</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -1579,11 +1945,47 @@ export default function Result() {
               )}
             </div>
 
-            {/* Content Sections */}
+            {/* Content Sections / Theme View */}
             <div className="rounded-lg border bg-white">
               <div className="border-b px-6 py-4">
-                <div className="text-xs font-medium tracking-wide text-gray-500 uppercase">
-                  Content Sections
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    {activeThemeId && (
+                      <button
+                        onClick={() => setActiveThemeId(null)}
+                        className="flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50"
+                      >
+                        <svg
+                          className="h-3 w-3"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M15 19l-7-7 7-7"
+                          />
+                        </svg>
+                        Back
+                      </button>
+                    )}
+                    <div className="text-xs font-medium tracking-wide text-gray-500 uppercase">
+                      {activeThemeId
+                        ? `Theme: ${themes.find((t) => t.id === activeThemeId)?.title || ""}`
+                        : "Content Sections"}
+                    </div>
+                  </div>
+                  {activeThemeId && (
+                    <span
+                      className="h-3 w-3 rounded-full"
+                      style={{
+                        backgroundColor:
+                          themes.find((t) => t.id === activeThemeId)?.color || "#6366f1",
+                      }}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -1611,12 +2013,88 @@ export default function Result() {
                     </Button>
                   </Link>
                 </div>
+              ) : activeThemeId ? (
+                // === Theme View ===
+                (() => {
+                  const activeTheme = themes.find((t) => t.id === activeThemeId);
+                  if (!activeTheme) return null;
+
+                  return (
+                    <div className="p-6">
+                      {/* Theme Header */}
+                      <div
+                        className="mb-6 rounded-lg border-l-4 bg-gray-50 p-4"
+                        style={{ borderLeftColor: activeTheme.color || "#6366f1" }}
+                      >
+                        <h2 className="text-lg font-bold text-gray-900">{activeTheme.title}</h2>
+                        {activeTheme.description && (
+                          <p className="mt-2 text-sm text-gray-600">{activeTheme.description}</p>
+                        )}
+                        <p className="mt-2 text-xs text-gray-400">
+                          {activeTheme.content?.length || 0} Key Points
+                        </p>
+                      </div>
+
+                      {/* Theme Content */}
+                      <div className="space-y-4">
+                        {activeTheme.content?.map((item, index) => (
+                          <div
+                            key={index}
+                            className="group flex gap-4 rounded-lg border border-gray-100 p-4 transition-colors hover:border-gray-200 hover:bg-gray-50"
+                          >
+                            {/* Timestamp */}
+                            <button
+                              onClick={() => jumpToTimestamp(item.timestampStart)}
+                              className="flex h-8 flex-shrink-0 items-center gap-1 rounded-lg bg-gray-100 px-3 font-mono text-xs text-gray-600 transition-colors hover:bg-blue-100 hover:text-blue-700"
+                            >
+                              <svg
+                                className="h-3 w-3"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+                                />
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                />
+                              </svg>
+                              {item.timestampStart}
+                            </button>
+
+                            {/* Content */}
+                            <div className="flex-1">
+                              <p className="text-sm leading-relaxed text-gray-700">
+                                {item.content}
+                              </p>
+                            </div>
+
+                            {/* Index badge */}
+                            <span
+                              className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-medium text-white"
+                              style={{ backgroundColor: activeTheme.color || "#6366f1" }}
+                            >
+                              {index + 1}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()
               ) : !videoData?.sections || videoData.sections.length === 0 ? (
                 <div className="p-12 text-center">
                   {isStreaming ? (
                     <div className="flex items-center justify-center gap-3">
                       <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"></div>
-                      <p className="text-gray-600">AI 正在分析视频内容...</p>
+                      <p className="text-gray-600">AI Analyzing video content...</p>
                     </div>
                   ) : (
                     <p className="text-gray-600">No content sections available</p>
@@ -1782,7 +2260,29 @@ export default function Result() {
           <div className="w-[420px] flex-shrink-0 space-y-4">
             {/* Video Player */}
             <div className="sticky top-20 overflow-visible rounded-lg border bg-white">
-              <div className="aspect-video bg-black">
+              <div className="relative aspect-video bg-black">
+                {/* Clip 播放进度指示器 - 始终渲染，用 CSS 控制显示以避免 React DOM 冲突 */}
+                <div
+                  className={`absolute top-2 right-2 z-20 flex items-center gap-2 rounded-lg bg-black/80 px-3 py-1.5 text-xs text-white shadow-lg transition-opacity ${
+                    clipPlaylist && clipPlaylist.isPlaying
+                      ? "opacity-100"
+                      : "pointer-events-none opacity-0"
+                  }`}
+                >
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-green-400"></span>
+                  <span>
+                    Clip {(clipPlaylist?.currentIndex ?? 0) + 1} / {clipPlaylist?.clips.length ?? 0}
+                  </span>
+                  <button
+                    onClick={() => setClipPlaylist(null)}
+                    className="ml-1 rounded p-0.5 hover:bg-white/20"
+                    title="Stop playback"
+                  >
+                    <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M6 6h12v12H6z" />
+                    </svg>
+                  </button>
+                </div>
                 {!videoId ? (
                   // 流式分析中，videoId 尚未获取
                   <div className="flex h-full w-full items-center justify-center bg-gray-900">
@@ -1806,7 +2306,7 @@ export default function Result() {
                           d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                         />
                       </svg>
-                      <p className="mt-2 text-sm text-gray-500">正在加载视频...</p>
+                      <p className="mt-2 text-sm text-gray-500">Loading video...</p>
                     </div>
                   </div>
                 ) : isExtension ? (
@@ -1872,7 +2372,7 @@ export default function Result() {
               </div>
 
               {/* Tab Content */}
-              <div ref={transcriptContainerRef} className="h-[500px] overflow-y-auto">
+              <div ref={transcriptContainerRef} className="h-[400px] overflow-y-auto">
                 {/* Transcript Tab */}
                 {activeTab === "transcript" && (
                   <div className="space-y-3 p-4">
@@ -1924,6 +2424,29 @@ export default function Result() {
                           >
                             {msg.type === "bot"
                               ? parseMessageWithTimestamp(msg.content).map((part, idx) => {
+                                  if (part.type === "timeRange" && part.startTime) {
+                                    // 时间范围格式：📎 [06:45 - 07:05]
+                                    return (
+                                      <span
+                                        key={idx}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          jumpToTimestamp(part.startTime!);
+                                        }}
+                                        className="inline-flex cursor-pointer items-center gap-1 rounded bg-green-100 px-2 py-0.5 font-mono text-green-700 transition-colors hover:bg-green-200 hover:text-green-800"
+                                        title={`Play clip: ${part.startTime} - ${part.endTime}`}
+                                      >
+                                        <svg
+                                          className="h-3.5 w-3.5"
+                                          fill="currentColor"
+                                          viewBox="0 0 24 24"
+                                        >
+                                          <path d="M8 5v14l11-7z" />
+                                        </svg>
+                                        {part.startTime} - {part.endTime}
+                                      </span>
+                                    );
+                                  }
                                   if (part.type === "timestamp") {
                                     return (
                                       <span
@@ -2193,6 +2716,180 @@ export default function Result() {
                         </div>
                       )}
                     </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Comments Panel - Feishu style */}
+              <div className="flex max-h-[400px] flex-col border-t border-gray-200">
+                <div className="border-b border-gray-100 px-4 py-3">
+                  <button
+                    onClick={() => setIsCommentsExpanded(!isCommentsExpanded)}
+                    className="-mx-4 -my-3 flex w-full items-center justify-between gap-2 rounded-t-lg px-4 py-3 transition-colors hover:bg-gray-50"
+                  >
+                    <div className="flex items-center gap-2">
+                      <svg
+                        className="h-4 w-4 text-gray-500"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+                        />
+                      </svg>
+                      <span className="text-xs font-medium text-gray-700">Comments</span>
+                    </div>
+                    <svg
+                      className={`h-4 w-4 text-gray-400 transition-transform ${isCommentsExpanded ? "rotate-180" : ""}`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 9l-7 7-7-7"
+                      />
+                    </svg>
+                  </button>
+                </div>
+
+                {isCommentsExpanded && (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {!selectedSentence ? (
+                      <div className="px-4 py-8 text-center">
+                        <svg
+                          className="mx-auto mb-2 h-8 w-8 text-gray-300"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={1.5}
+                            d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"
+                          />
+                        </svg>
+                        <p className="text-xs text-gray-500">悬停在句子上</p>
+                        <p className="text-xs text-gray-400">查看或添加评论</p>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Selected sentence preview */}
+                        {/* <div className="border-b border-gray-100 bg-amber-50 px-4 py-2 flex-shrink-0">
+                        <p className="line-clamp-2 text-xs text-amber-800">
+                          "{selectedSentence.content}"
+                        </p>
+                        <button
+                          onClick={() => setSelectedSentence(null)}
+                          className="mt-1 text-[10px] text-amber-600 hover:text-amber-700"
+                        >
+                          取消选择
+                        </button> */}
+                        {/* </div> */}
+
+                        {/* Comments list */}
+                        <div className="min-h-0 flex-1 overflow-y-auto">
+                          {sidebarCommentsLoading ? (
+                            <div className="flex items-center justify-center py-6">
+                              <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></div>
+                            </div>
+                          ) : sidebarComments.length === 0 ? (
+                            <div className="px-4 py-6 text-center">
+                              <p className="text-xs text-gray-500">暂无评论</p>
+                              <p className="text-xs text-gray-400">成为第一个评论者！</p>
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-gray-50">
+                              {sidebarComments.map((comment) => (
+                                <div key={comment.id} className="px-4 py-3">
+                                  <div className="flex gap-2">
+                                    {comment.avatar && (
+                                      <img
+                                        src={comment.avatar}
+                                        alt={comment.author}
+                                        className="h-5 w-5 flex-shrink-0 rounded-full bg-gray-100"
+                                      />
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                      <div className="mb-1 flex items-baseline gap-1">
+                                        <span className="text-[11px] font-medium text-gray-900">
+                                          {comment.author}
+                                        </span>
+                                        {comment.is_ai_generated && (
+                                          <span className="rounded bg-purple-100 px-1 py-0.5 text-[8px] font-medium text-purple-600">
+                                            AI
+                                          </span>
+                                        )}
+                                      </div>
+                                      <p className="text-[11px] leading-relaxed text-gray-700">
+                                        {comment.comment_text}
+                                      </p>
+                                      <span className="text-[9px] text-gray-400">
+                                        {new Date(comment.created_at).toLocaleDateString()}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Add comment form */}
+                        <form
+                          onSubmit={handleSubmitSidebarComment}
+                          className="border-t border-gray-100 p-3"
+                        >
+                          <input
+                            type="text"
+                            placeholder="你的名字（可选）"
+                            value={sidebarAuthorName}
+                            onChange={(e) => setSidebarAuthorName(e.target.value)}
+                            className="mb-2 w-full rounded border border-gray-200 px-2 py-1 text-[11px] focus:border-blue-400 focus:outline-none"
+                          />
+                          <div className="flex gap-1">
+                            <input
+                              type="text"
+                              placeholder="添加评论..."
+                              value={newSidebarComment}
+                              onChange={(e) => setNewSidebarComment(e.target.value)}
+                              className="flex-1 rounded border border-gray-200 px-2 py-1.5 text-[11px] focus:border-blue-400 focus:outline-none"
+                              disabled={isSubmittingSidebarComment}
+                            />
+                            <button
+                              type="submit"
+                              disabled={!newSidebarComment.trim() || isSubmittingSidebarComment}
+                              className="rounded bg-blue-600 px-2 py-1.5 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+                            >
+                              {isSubmittingSidebarComment ? (
+                                <div className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                              ) : (
+                                <svg
+                                  className="h-3 w-3"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                                  />
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                        </form>
+                      </>
+                    )}
                   </div>
                 )}
               </div>

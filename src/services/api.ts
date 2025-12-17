@@ -21,6 +21,151 @@ export interface URLAnalysisResponse {
   error?: string;
 }
 
+// ==================== YouTube Search (SerpAPI) ====================
+
+export interface YouTubeSearchResult {
+  position?: number;
+  title: string;
+  videoId: string;
+  link: string;
+  thumbnail?: string;
+  channel?: string;
+  channelLink?: string;
+  publishedDate?: string;
+  views?: number;
+  length?: string;
+  description?: string;
+}
+
+export interface YouTubeSearchResponse {
+  success: boolean;
+  results: YouTubeSearchResult[];
+  total: number;
+  cached?: boolean;
+  error?: string;
+}
+
+export interface YouTubeSearchParams {
+  search_query: string;
+  gl?: string; // 国家/地区代码 (如 "us", "cn")
+  hl?: string; // 语言代码 (如 "en", "zh-CN")
+}
+
+/**
+ * 使用 SerpAPI 搜索 YouTube 视频
+ * @param query 搜索关键词
+ * @param options 可选参数 (gl, hl)
+ * @returns 搜索结果
+ */
+export async function searchYouTubeVideos(
+  query: string,
+  options?: { gl?: string; hl?: string },
+): Promise<YouTubeSearchResponse> {
+  try {
+    const response = await fetch("/api/search-youtube", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        search_query: query,
+        gl: options?.gl || "us",
+        hl: options?.hl || "en",
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail?.message || `HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error("YouTube 搜索失败:", error);
+    return {
+      success: false,
+      results: [],
+      total: 0,
+      error: error instanceof Error ? error.message : "搜索失败",
+    };
+  }
+}
+
+/**
+ * 使用 SerpAPI 搜索 YouTube 视频（支持自定义时长过滤）
+ * @param query 搜索关键词
+ * @param options 搜索选项
+ * @returns 搜索结果
+ */
+export async function searchYouTubeDataAPI(
+  query: string,
+  options?: {
+    limit?: number;
+    order?: string;
+    duration?: string; // any, short(<20min), medium(20min-1hour), long(>1hour)
+    time_filter?: string;
+  },
+): Promise<YouTubeSearchResponse> {
+  try {
+    const response = await fetch("/api/search-youtube", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        search_query: query,
+        gl: "us",
+        hl: "en",
+        duration: options?.duration || "long",
+        limit: options?.limit || 10,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail?.message || `HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // 转换为统一格式（SerpAPI 返回的格式）
+    return {
+      success: data.success,
+      results: data.results.map(
+        (r: {
+          videoId: string;
+          title: string;
+          thumbnail: string;
+          link: string;
+          length?: string;
+          channel?: string;
+          views?: number;
+          publishedDate?: string;
+        }) => ({
+          videoId: r.videoId,
+          title: r.title,
+          thumbnail: r.thumbnail,
+          link: r.link,
+          length: r.length || "",
+          channel: r.channel || "",
+          views: r.views || 0,
+          publishedDate: r.publishedDate || "",
+        }),
+      ),
+      total: data.total,
+    };
+  } catch (error) {
+    console.error("YouTube Data API 搜索失败:", error);
+    return {
+      success: false,
+      results: [],
+      total: 0,
+      error: error instanceof Error ? error.message : "搜索失败",
+    };
+  }
+}
+
 /**
  * 调用后端 API 解析 URL
  * @param url 要解析的 URL

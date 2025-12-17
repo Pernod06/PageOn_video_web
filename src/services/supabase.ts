@@ -31,7 +31,14 @@ export const isSupabaseConfigured = (): boolean => {
 let supabaseInstance: SupabaseClient | null = null;
 
 if (isSupabaseConfigured()) {
-  supabaseInstance = createClient(supabaseUrl, supabaseAnonKey);
+  supabaseInstance = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: true, // 确保检测 URL 中的 session
+      flowType: "implicit", // 使用隐式流
+    },
+  });
 } else {
   console.warn(
     "[Supabase] Missing environment variables. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY. Comment features will be disabled.",
