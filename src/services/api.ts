@@ -119,6 +119,7 @@ export async function searchYouTubeDataAPI(
         hl: "en",
         duration: options?.duration || "long",
         limit: options?.limit || 10,
+        has_cc: true,
       }),
     });
 

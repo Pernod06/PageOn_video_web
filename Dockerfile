@@ -1,7 +1,7 @@
 # Dockerfile
 
 # Step 1: Use Node.js base image
-FROM node:18 AS build
+FROM node:20 AS build
 
 # Step 2: Set working directory
 WORKDIR /app

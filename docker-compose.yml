@@ -7,6 +7,6 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:80" # Map Nginx port to localhost port
+      - "3000:80" # 主机 Nginx 会代理到这个端口
     container_name: vite-react-app
     restart: unless-stopped

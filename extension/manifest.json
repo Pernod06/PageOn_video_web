@@ -1,7 +1,7 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 4,
   "name": "PageOn - Video Analysis",
-  "version": "1.0.1",
+  "version": "3.0.1",
   "description": "Intelligent video analysis tool - Transform any video into structured insights",
   "icons": {
     "16": "icons/icon16.png",
@@ -25,7 +25,8 @@
     {
       "matches": ["https://www.youtube.com/*", "https://youtube.com/*"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "css": ["style.css"],
+      "run_at": "document_end"
     }
   ]
 }

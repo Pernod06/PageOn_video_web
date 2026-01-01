@@ -22,7 +22,7 @@ const useHttps = true; // fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath
 export default defineConfig({
   server: {
     host: "0.0.0.0",
-    port: 3500,
+    port: 3000,
     // Enable HTTPS if certificates exist
     https: useHttps
       ? {
@@ -32,7 +32,7 @@ export default defineConfig({
       : undefined,
     proxy: {
       "/api": {
-        target: "https://localhost:5500",
+        target: "https://localhost:5000",
         changeOrigin: true,
         secure: false,
         timeout: 300000, // 5 minutes timeout
@@ -44,7 +44,8 @@ export default defineConfig({
           proxy.on("error", (err, _req, res) => {
             console.error("[Proxy] ❌ Error:", err.message);
             // 防止 ECONNRESET 导致 502
-            if (!res.headersSent) {
+            // 类型检查：res 可能是 Socket 或 ServerResponse
+            if (res && "writeHead" in res && !res.headersSent) {
               res.writeHead(502, { "Content-Type": "text/plain" });
               res.end("Proxy error: " + err.message);
             }
@@ -79,7 +80,6 @@ export default defineConfig({
     Pages({
       dirs: "src/pages",
       extensions: ["tsx", "jsx"],
-      importMode: "sync",
     }),
     svgr(),
 

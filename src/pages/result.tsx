@@ -1,13 +1,18 @@
-import { Button, SentenceWithComments } from "@/components";
-import { useLocation, Link } from "react-router";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { Button, MermaidChart, UserMenu } from "@/components";
+import { useLocation, Link, useSearchParams } from "react-router";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   getAllCommentCounts,
   fetchSentenceComments,
   postComment,
   SentenceComment,
 } from "@/services/commentService";
+import { checkUserLiked, toggleVideoLike, getVideoLikeCount } from "@/services/likeService";
+import { checkUserFavorited, toggleFavorite } from "@/services/favoriteService";
+import { searchYouTubeDataAPI, type YouTubeSearchResult } from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
+import ReactMarkdown from "react-markdown";
+// lucide-react icons removed - using inline SVGs and emojis for Nextra style
 
 interface ThemeContentItem {
   content: string;
@@ -22,7 +27,93 @@ interface Theme {
   color?: string; // 前端自动分配颜色
 }
 
+// ============ V2.0 Structured Article Interfaces ============
+interface ArticleMeta {
+  title: string;
+  tags: string[];
+  reading_time: string;
+  difficulty: string;
+  last_updated: string;
+}
+
+interface HeaderHook {
+  quote: string;
+  author?: string;
+}
+
+interface SummaryBox {
+  key_insight: string;
+  bullet_points: string[];
+}
+
+interface BackgroundCard {
+  type: string; // "Concept" | "Person" | "Tool"
+  name: string;
+  description: string;
+  icon_hint: string;
+}
+
+interface VisualBreak {
+  type: string; // "Quote" | "Stat"
+  content: string;
+}
+
+interface MainBodySection {
+  section_title: string;
+  content_markdown: string;
+  timestamp_ref: string;
+  visual_break?: VisualBreak;
+  thumbnail_url?: string;
+}
+
+interface DeepPoint {
+  title: string;
+  detailed_explanation: string;
+  evidence_quote: string;
+}
+
+interface DeepAnalysis {
+  mermaid_graph: string;
+  deep_points: DeepPoint[];
+}
+
+interface QAInteraction {
+  question: string;
+  answer: string;
+  type: string; // "Core Concept" | "Counter-Intuitive"
+}
+
+interface Resource {
+  name: string;
+  type: string; // "Book" | "Paper" | "Link" | "Tool"
+}
+
+interface ArticleFooter {
+  resources: Resource[];
+  actionable_next_steps: string[];
+}
+
+interface VisualSummaryChart {
+  title?: string;
+  ascii_art?: string;
+}
+
+// Full V2.0 structured article type (exported for external use)
+export interface StructuredArticleV2 {
+  meta: ArticleMeta;
+  header_hook: HeaderHook;
+  summary_box: SummaryBox;
+  background_cards: BackgroundCard[];
+  main_body: MainBodySection[];
+  visual_summary_chart?: VisualSummaryChart; // 可选，兼容老版本
+  deep_analysis: DeepAnalysis;
+  qa_interactions: QAInteraction[];
+  footer: ArticleFooter;
+}
+// ============ End V2.0 Interfaces ============
+
 interface VideoData {
+  // V2.0 Structured Article fields (Only V2.0 format supported)
   videoInfo?: {
     videoId: string;
     title: string;
@@ -30,21 +121,99 @@ interface VideoData {
     thumbnail?: string;
     summary?: string;
   };
-  sections?: Array<{
-    id: string;
-    title: string;
-    content: Array<{
-      content: string;
-      timestampStart: string;
-    }>;
-  }>;
   chapters?: Array<{
     timestamp: number;
     title: string;
     thumbnail_url?: string;
   }>;
   themes?: Theme[];
+  meta?: ArticleMeta;
+  header_hook?: HeaderHook;
+  summary_box?: SummaryBox;
+  background_cards?: BackgroundCard[];
+  main_body?: MainBodySection[];
+  visual_summary_chart?: VisualSummaryChart; // 可选，兼容老版本
+  deep_analysis?: DeepAnalysis;
+  qa_interactions?: QAInteraction[];
+  footer?: ArticleFooter;
+  key_takeaways_image_url?: string;
 }
+
+// Flashcard Component for Q&A (currently unused)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _FlashCard = ({
+  question,
+  answer,
+  type,
+}: {
+  question: string;
+  answer: string;
+  type: string;
+}) => {
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const [isFlipped, setIsFlipped] = useState(false);
+
+  return (
+    <div
+      className="group h-56 cursor-pointer"
+      onClick={() => setIsFlipped(!isFlipped)}
+      style={{ perspective: "1000px" }}
+    >
+      <div
+        className="relative h-full w-full transition-transform duration-500"
+        style={{
+          transformStyle: "preserve-3d",
+          transform: isFlipped ? "rotateY(180deg)" : "rotateY(0deg)",
+        }}
+      >
+        {/* Front - Question (Dark) */}
+        <div
+          className="absolute inset-0 flex flex-col rounded-2xl bg-slate-900 p-5 text-white shadow-xl"
+          style={{ backfaceVisibility: "hidden" }}
+        >
+          <div className="mb-2 flex items-center justify-between">
+            <span className="inline-block rounded-full bg-white/10 px-2 py-0.5 text-[10px] tracking-wider text-slate-300 uppercase">
+              {type}
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            <p className="text-sm leading-relaxed font-medium">{question}</p>
+          </div>
+          {/* <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-3 text-xs text-slate-500">
+            <span>Tap to reveal</span>
+            <svg className="h-4 w-4 transition-transform group-hover:translate-x-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </div> */}
+        </div>
+
+        {/* Back - Answer (Light) */}
+        <div
+          className="absolute inset-0 flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
+          style={{
+            backfaceVisibility: "hidden",
+            transform: "rotateY(180deg)",
+          }}
+        >
+          <div className="mb-2">
+            <span className="inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium tracking-wider text-emerald-700 uppercase">
+              Answer
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            <p className="text-sm leading-relaxed text-slate-700">{answer}</p>
+          </div>
+          {/* <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-400">
+            <span>Tap to flip back</span>
+            <svg className="h-4 w-4 rotate-180 transition-transform group-hover:-translate-x-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </div> */}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 interface YouTubePlayer {
   seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
@@ -126,11 +295,13 @@ const extractClipsFromMessage = (content: string) => {
 };
 
 // API配置
-// 开发环境使用相对路径（通过 vite 代理），生产环境使用完整 URL
-const API_BASE_URL = import.meta.env.DEV ? "" : "https://52.72.117.236:5500";
+// 开发环境和生产环境都使用相对路径（通过代理转发到后端）
+// 开发环境: Vite 代理 -> localhost:5500
+// 生产环境: Nginx 代理 -> backend:5000
+const API_BASE_URL = "";
 
-// 流式请求直接访问后端，绕过 Vite 代理的缓冲问题
-const STREAM_API_URL = "https://52.72.117.236:5500";
+// 流式请求也通过代理，避免 HTTPS/HTTP 混合问题
+const STREAM_API_URL = "";
 
 // 检测是否在扩展环境中运行
 const isExtension = import.meta.env.VITE_IS_EXTENSION === "true";
@@ -138,14 +309,19 @@ const isExtension = import.meta.env.VITE_IS_EXTENSION === "true";
 export default function Result() {
   const location = useLocation();
   const { user } = useAuth(); // 获取当前登录用户
+  const [searchParams] = useSearchParams();
+
+  // 从 url中获取 videoId
+  const paramVideoId = searchParams.get("v");
+
   const {
     videoId: initialVideoId,
     title,
     chapters: initialChapters = [],
     isExample = false,
     language: initialLanguage = "en",
-    sections: initialSections = null,
     videoInfo: initialVideoInfo = null,
+    main_body: initialMainBody = null,
     cached = false,
     streamingUrl = null, // 流式分析 URL
   } = (location.state as {
@@ -154,14 +330,19 @@ export default function Result() {
     chapters?: Chapter[];
     isExample?: boolean;
     language?: string;
-    sections?: VideoData["sections"];
     videoInfo?: VideoData["videoInfo"];
+    main_body?: VideoData["main_body"];
     cached?: boolean;
     streamingUrl?: string | null;
   }) || {};
 
   // 如果有 streamingUrl，videoId 从流式分析中获取
-  const [videoId, setVideoId] = useState<string | undefined>(initialVideoId);
+  const [videoId, setVideoId] = useState<string | undefined>(
+    initialVideoId || paramVideoId || undefined,
+  );
+
+  // 添加分享状态
+  const [isShareCopied, setIsShareCopied] = useState(false);
 
   // 语言选择状态
   const [language, setLanguage] = useState<string>(initialLanguage);
@@ -171,6 +352,17 @@ export default function Result() {
   const [videoData, setVideoData] = useState<VideoData | null>(null);
   const [, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Key Takeaways 图像生成状态
+  const [imageGenStatus, setImageGenStatus] = useState<{
+    status: "pending" | "generating" | "completed" | "failed";
+    imageUrl?: string;
+    errorMessage?: string;
+  } | null>(null);
+
+  // Related YouTube Videos 搜索结果
+  const [relatedVideos, setRelatedVideos] = useState<Map<string, YouTubeSearchResult>>(new Map());
+  const [isSearchingVideos, setIsSearchingVideos] = useState(false);
 
   // 流式分析状态
   const [isStreaming, setIsStreaming] = useState(false);
@@ -182,15 +374,9 @@ export default function Result() {
   const streamParseStateRef = useRef<{
     videoInfoDone: boolean;
     videoInfoStart: number;
-    sectionsStart: number;
-    scanIndex: number;
-    seenSectionIds: Set<string>;
   }>({
     videoInfoDone: false,
     videoInfoStart: -1,
-    sectionsStart: -1,
-    scanIndex: 0,
-    seenSectionIds: new Set(),
   });
   const [activeTab, setActiveTab] = useState<TabType>("transcript");
   const [chatMessages, setChatMessages] = useState([
@@ -208,7 +394,7 @@ export default function Result() {
   const [, setComments] = useState<Comment[]>([]);
   const [, setCommentsLoading] = useState(false);
   const [, setCommentsError] = useState<string | null>(null);
-  const [chapters, setChapters] = useState<Chapter[]>(initialChapters);
+  const [, setChapters] = useState<Chapter[]>(initialChapters);
 
   // Theme 相关状态
   const [themes, setThemes] = useState<Theme[]>([]);
@@ -224,9 +410,7 @@ export default function Result() {
   } | null>(null);
 
   // Sentence comments state
-  const [sentenceCommentCounts, setSentenceCommentCounts] = useState<Map<string, number>>(
-    new Map(),
-  );
+  const [, setSentenceCommentCounts] = useState<Map<string, number>>(new Map());
 
   // Selected sentence for sidebar comments (Feishu-style)
   const [selectedSentence, setSelectedSentence] = useState<{
@@ -235,12 +419,11 @@ export default function Result() {
     sentenceIndex: number;
     content: string;
   } | null>(null);
-  const [sidebarComments, setSidebarComments] = useState<SentenceComment[]>([]);
-  const [sidebarCommentsLoading, setSidebarCommentsLoading] = useState(false);
+  const [, setSidebarComments] = useState<SentenceComment[]>([]);
+  const [, setSidebarCommentsLoading] = useState(false);
   const [newSidebarComment, setNewSidebarComment] = useState("");
-  const [sidebarAuthorName, setSidebarAuthorName] = useState("");
-  const [isSubmittingSidebarComment, setIsSubmittingSidebarComment] = useState(false);
-  const [isCommentsExpanded, setIsCommentsExpanded] = useState(true);
+  const [sidebarAuthorName] = useState("");
+  const [, setIsSubmittingSidebarComment] = useState(false);
 
   // Notes state
   const [notes, setNotes] = useState<Note[]>([]);
@@ -251,6 +434,14 @@ export default function Result() {
   } | null>(null);
   const [noteInputText, setNoteInputText] = useState("");
 
+  // Copy button state
+  const [isCopied, setIsCopied] = useState(false);
+  const [isLiked, setIsLiked] = useState(false);
+  const [likeCount, setLikeCount] = useState(0);
+  const [isLikeLoading, setIsLikeLoading] = useState(false);
+  const [isFavorited, setIsFavorited] = useState(false);
+  const [isFavoriteLoading, setIsFavoriteLoading] = useState(false);
+
   // 保存完整的 transcript 文本内容
   const transcriptContent = useRef<string>("");
 
@@ -260,8 +451,7 @@ export default function Result() {
   const [youtubeStartTime, setYoutubeStartTime] = useState(0);
 
   // 增量解析：从 SSE 累积文本中尽量提取已"闭合"的 videoInfo / section 对象
-  // @ts-expect-error - This callback is kept for potential future use
-  // eslint-disable-next-line
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const flushStreamingUpdates = useCallback(() => {
     streamFlushRafRef.current = null;
     if (!streamChunkAccRef.current) return;
@@ -329,100 +519,22 @@ export default function Result() {
       }
     }
 
-    // 2) sections：从 "sections": [ 开始扫描，提取闭合的 { ... } section 对象
-    if (state.sectionsStart === -1) {
-      const idx = content.indexOf('"sections"');
-      if (idx !== -1) {
-        const bracketStart = content.indexOf("[", idx);
-        if (bracketStart !== -1) {
-          state.sectionsStart = bracketStart;
-          state.scanIndex = bracketStart + 1;
-        }
-      }
-    }
-
-    if (state.sectionsStart !== -1 && state.scanIndex < content.length) {
-      const newSections: NonNullable<VideoData["sections"]> = [];
-      let inString = false;
-      let escape = false;
-      let objDepth = 0;
-      let objStart = -1;
-
-      for (let i = Math.max(state.scanIndex, state.sectionsStart + 1); i < content.length; i++) {
-        const ch = content[i];
-        if (escape) {
-          escape = false;
-          continue;
-        }
-        if (ch === "\\\\") {
-          if (inString) escape = true;
-          continue;
-        }
-        if (ch === '"') {
-          inString = !inString;
-          continue;
-        }
-        if (inString) continue;
-
-        if (ch === "{") {
-          if (objDepth === 0) objStart = i;
-          objDepth++;
-          continue;
-        }
-        if (ch === "}") {
-          objDepth--;
-          if (objDepth === 0 && objStart !== -1) {
-            const objStr = content.slice(objStart, i + 1);
-            try {
-              const section = JSON.parse(objStr) as NonNullable<VideoData["sections"]>[number];
-              if (section?.id && !state.seenSectionIds.has(section.id)) {
-                state.seenSectionIds.add(section.id);
-                newSections.push(section);
-              }
-            } catch {
-              // ignore
-            }
-            objStart = -1;
-          }
-          continue;
-        }
-
-        // sections 数组闭合
-        if (ch === "]" && objDepth === 0) {
-          state.scanIndex = i + 1;
-          break;
-        }
-
-        state.scanIndex = i;
-      }
-
-      if (newSections.length > 0) {
-        patch.sections = newSections;
-      }
-    }
-
+    // V2.0: 只解析 videoInfo，完整的 V2.0 JSON 由后端一次性发送
     if (Object.keys(patch).length > 0) {
       console.log("[Stream] 解析到数据:", {
         hasVideoInfo: !!patch.videoInfo,
-        newSectionsCount: patch.sections?.length || 0,
       });
       setVideoData((prev) => {
         const base: VideoData = prev || {};
         const merged: VideoData = { ...base, ...patch };
-        if (patch.sections) {
-          merged.sections = [...(base.sections || []), ...(patch.sections || [])];
-        }
-        console.log("[Stream] 更新 videoData, sections:", merged.sections?.length || 0);
+        console.log("[Stream] 更新 videoData");
         return merged;
       });
     } else {
       // 调试：看看为什么没有解析到数据
-      const state = streamParseStateRef.current;
       console.log("[Stream] flush 但无数据:", {
         contentLen: content.length,
         videoInfoDone: state.videoInfoDone,
-        sectionsStart: state.sectionsStart,
-        scanIndex: state.scanIndex,
       });
     }
   }, []);
@@ -439,9 +551,6 @@ export default function Result() {
       streamParseStateRef.current = {
         videoInfoDone: false,
         videoInfoStart: -1,
-        sectionsStart: -1,
-        scanIndex: 0,
-        seenSectionIds: new Set(),
       };
 
       abortControllerRef.current = new AbortController();
@@ -464,12 +573,12 @@ export default function Result() {
         });
 
         if (!response.ok) {
-          throw new Error(`服务器错误: ${response.status}`);
+          throw new Error(`Server error: ${response.status}`);
         }
 
         const reader = response.body?.getReader();
         if (!reader) {
-          throw new Error("无法读取响应流");
+          throw new Error("Failed to read response stream");
         }
 
         const decoder = new TextDecoder();
@@ -494,8 +603,32 @@ export default function Result() {
                 try {
                   const finalData = JSON.parse(jsonText) as VideoData;
                   console.log("[Result] Streaming complete:", finalData);
-                  setVideoData(finalData);
-                  setVideoId(finalData.videoInfo?.videoId);
+                  // 保留可能已经接收到的 key_takeaways_image_url
+                  const imageUrl = finalData.key_takeaways_image_url;
+
+                  setVideoData((prev) => ({
+                    ...finalData,
+                    key_takeaways_image_url: prev?.key_takeaways_image_url || imageUrl,
+                  }));
+
+                  // 设置图像生成状态（图像生成现在是阻塞的，URL 会直接包含在 [DONE] 中）
+                  if (imageUrl) {
+                    setImageGenStatus({
+                      status: "completed",
+                      imageUrl: imageUrl,
+                    });
+                  } else {
+                    // 如果没有图像 URL，可能是生成失败
+                    setImageGenStatus({
+                      status: "failed",
+                      errorMessage: "图像生成失败或未生成",
+                    });
+                  }
+
+                  // 更新 videoId（如果还没有设置的话，或者从流式分析中获取到了更准确的信息）
+                  if (finalData.videoInfo?.videoId) {
+                    setVideoId((prev) => prev || finalData.videoInfo?.videoId);
+                  }
                   if (finalData.chapters) {
                     setChapters(finalData.chapters as Chapter[]);
                   }
@@ -511,6 +644,8 @@ export default function Result() {
                 continue;
               }
 
+              // 注意：图像 URL 现在直接包含在 [DONE] 消息中，不再需要单独处理 [KEY_TAKEAWAYS_IMAGE] 标签
+
               if (payload.startsWith("[ERROR]")) {
                 const errorMsg = payload.replace(/^\[ERROR\]\s*/, "");
                 console.error("[Result] Streaming error:", errorMsg);
@@ -520,24 +655,181 @@ export default function Result() {
                 continue;
               }
 
-              // 处理结构化事件流 {"type": "video_info" | "section", "data": {...}}
+              // 处理结构化事件流 {"type": "video_info" | "delta", ...}
               try {
                 const event = JSON.parse(payload);
-                if (event.type && event.data) {
-                  if (event.type === "video_info") {
-                    console.log("[Stream] 收到 video_info 事件:", event.data.title);
-                    setVideoData((prev) => ({
-                      ...(prev ?? {}),
-                      videoInfo: event.data,
-                    }));
-                    setVideoId(event.data.videoId);
-                  } else if (event.type === "section") {
-                    console.log("[Stream] 收到 section 事件:", event.data.id, event.data.title);
-                    setVideoData((prev) => ({
-                      ...(prev ?? {}),
-                      sections: [...(prev?.sections || []), event.data],
-                    }));
-                  }
+
+                if (event.type === "video_info" && event.data) {
+                  console.log("[Stream] 收到 video_info 事件:", event.data.title);
+                  setVideoData((prev) => ({
+                    ...(prev ?? {}),
+                    videoInfo: event.data,
+                  }));
+                  // 更新 videoId（如果还没有设置的话）
+                  setVideoId((prev) => prev || event.data.videoId);
+                  continue;
+                }
+
+                // 处理 delta 事件：累积内容并尝试增量解析
+                if (event.type === "delta" && event.content) {
+                  fullStreamContentRef.current += event.content;
+
+                  // 尝试增量解析 V2.0 结构
+                  const content = fullStreamContentRef.current;
+
+                  // 清理可能的 markdown 代码块
+                  const cleanContent = content
+                    .replace(/^```json?\s*\n?/, "")
+                    .replace(/\n?```\s*$/, "");
+
+                  // 辅助函数：提取完整的 JSON 对象
+                  const extractJsonObject = (str: string, key: string): unknown | null => {
+                    const keyMatch = str.match(new RegExp(`"${key}"\\s*:\\s*\\{`));
+                    if (!keyMatch) return null;
+
+                    const startIdx = keyMatch.index! + keyMatch[0].length - 1;
+                    let depth = 0;
+                    let inString = false;
+                    let escape = false;
+
+                    for (let i = startIdx; i < str.length; i++) {
+                      const ch = str[i];
+                      if (escape) {
+                        escape = false;
+                        continue;
+                      }
+                      if (ch === "\\") {
+                        if (inString) escape = true;
+                        continue;
+                      }
+                      if (ch === '"') {
+                        inString = !inString;
+                        continue;
+                      }
+                      if (inString) continue;
+                      if (ch === "{") depth++;
+                      if (ch === "}") {
+                        depth--;
+                        if (depth === 0) {
+                          try {
+                            return JSON.parse(str.slice(startIdx, i + 1));
+                          } catch {
+                            return null;
+                          }
+                        }
+                      }
+                    }
+                    return null;
+                  };
+
+                  // 增量更新各字段
+                  setVideoData((prev) => {
+                    const updates: Partial<VideoData> = {};
+                    let hasUpdates = false;
+
+                    // 解析 meta
+                    if (!prev?.meta) {
+                      const meta = extractJsonObject(cleanContent, "meta") as ArticleMeta | null;
+                      if (meta) {
+                        updates.meta = meta;
+                        hasUpdates = true;
+                        console.log("[Stream] 📝 解析到 meta:", meta.title);
+                      }
+                    }
+
+                    // 解析 header_hook
+                    if (!prev?.header_hook) {
+                      const headerHook = extractJsonObject(
+                        cleanContent,
+                        "header_hook",
+                      ) as HeaderHook | null;
+                      if (headerHook) {
+                        updates.header_hook = headerHook;
+                        hasUpdates = true;
+                        console.log("[Stream] 📝 解析到 header_hook");
+                      }
+                    }
+
+                    // 解析 summary_box
+                    if (!prev?.summary_box) {
+                      const summaryBox = extractJsonObject(
+                        cleanContent,
+                        "summary_box",
+                      ) as SummaryBox | null;
+                      if (summaryBox) {
+                        updates.summary_box = summaryBox;
+                        hasUpdates = true;
+                        console.log("[Stream] 📝 解析到 summary_box");
+                      }
+                    }
+
+                    // 解析 main_body sections
+                    const mainBodyMatch = cleanContent.match(/"main_body"\s*:\s*\[/);
+                    if (mainBodyMatch) {
+                      const startIdx = mainBodyMatch.index! + mainBodyMatch[0].length - 1;
+                      let depth = 0;
+                      let inString = false;
+                      let escape = false;
+                      let sectionStart = -1;
+                      const sections: MainBodySection[] = [];
+
+                      for (let i = startIdx; i < cleanContent.length; i++) {
+                        const ch = cleanContent[i];
+                        if (escape) {
+                          escape = false;
+                          continue;
+                        }
+                        if (ch === "\\") {
+                          if (inString) escape = true;
+                          continue;
+                        }
+                        if (ch === '"') {
+                          inString = !inString;
+                          continue;
+                        }
+                        if (inString) continue;
+
+                        if (ch === "{") {
+                          if (depth === 1 && sectionStart === -1) sectionStart = i;
+                          depth++;
+                        }
+                        if (ch === "}") {
+                          depth--;
+                          if (depth === 1 && sectionStart !== -1) {
+                            try {
+                              const section = JSON.parse(
+                                cleanContent.slice(sectionStart, i + 1),
+                              ) as MainBodySection;
+                              sections.push(section);
+                            } catch {
+                              /* section 不完整 */
+                            }
+                            sectionStart = -1;
+                          }
+                        }
+                        if (ch === "[") depth++;
+                        if (ch === "]") {
+                          depth--;
+                          if (depth === 0) break;
+                        }
+                      }
+
+                      const currentSections = prev?.main_body?.length || 0;
+                      if (sections.length > currentSections) {
+                        updates.main_body = sections;
+                        hasUpdates = true;
+                        console.log(
+                          `[Stream] 📝 解析到 ${sections.length} 个 sections (新增 ${sections.length - currentSections})`,
+                        );
+                      }
+                    }
+
+                    if (hasUpdates) {
+                      return { ...(prev ?? {}), ...updates };
+                    }
+                    return prev;
+                  });
+
                   continue;
                 }
               } catch {
@@ -557,21 +849,91 @@ export default function Result() {
         setError(err instanceof Error ? err.message : "分析失败");
       }
     },
-    [language],
+    [language, user?.id],
   );
 
   // 记录是否已经完成流式分析后的初始化
-  const streamingInitializedRef = useRef(false);
+  const playerInitializedRef = useRef(false);
+  // 存储从 streamingUrl 提取的 videoId，用于立即初始化播放器
+  const extractedVideoIdRef = useRef<string | null>(null);
+
+  // 从 URL 中提取 videoId 的工具函数
+  const extractVideoIdFromUrl = (url: string): string | null => {
+    try {
+      const urlObj = new URL(url);
+      if (urlObj.hostname.includes("youtube.com") || urlObj.hostname.includes("youtu.be")) {
+        // 处理 youtube.com/watch?v=xxx 格式
+        if (urlObj.pathname === "/watch") {
+          return urlObj.searchParams.get("v");
+        }
+        // 处理 youtu.be/xxx 格式
+        if (urlObj.hostname.includes("youtu.be")) {
+          return urlObj.pathname.slice(1);
+        }
+        // 处理 youtube.com/shorts/xxx 格式
+        if (urlObj.pathname.startsWith("/shorts/")) {
+          return urlObj.pathname.replace("/shorts/", "");
+        }
+      }
+      return null;
+    } catch {
+      // 如果 URL 解析失败，尝试正则表达式
+      const match = url.match(/(?:watch\?v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})/);
+      return match ? match[1] : null;
+    }
+  };
 
   useEffect(() => {
-    // 如果有 streamingUrl，启动流式分析（只在首次挂载时）
+    // 如果有 streamingUrl，先从 URL 中提取 videoId，立即初始化播放器和加载 transcript
     if (streamingUrl) {
-      // 防止 StrictMode 重复调用
-      if (abortControllerRef.current) {
-        return;
+      const extractedVideoId = extractVideoIdFromUrl(streamingUrl);
+
+      if (extractedVideoId) {
+        console.log("[Result] Extracted videoId from streamingUrl:", extractedVideoId);
+
+        // 存储到 ref 中，以便立即使用
+        extractedVideoIdRef.current = extractedVideoId;
+
+        // 立即设置 videoId，以便显示视频窗口
+        setVideoId(extractedVideoId);
+
+        // 立即初始化播放器和加载 transcript（只执行一次）
+        if (!playerInitializedRef.current) {
+          playerInitializedRef.current = true;
+          console.log("[Result] 🎬 Initializing player and loading transcript immediately");
+          setPlayerReady(false);
+
+          // 使用提取的 videoId 直接初始化，不依赖 state
+          // 先加载 transcript
+          loadTranscript(extractedVideoId, false).catch((err) => {
+            console.error("[Result] Failed to load transcript:", err);
+          });
+
+          if (isExample) {
+            loadChapters(extractedVideoId);
+          }
+
+          // 初始化播放器
+          // 对于扩展模式，iframe 会自动加载，不需要延迟
+          // 对于 web 模式，需要等待 videoId state 更新
+          if (isExtension) {
+            initializeYouTubePlayer();
+          } else {
+            setTimeout(() => {
+              initializeYouTubePlayer();
+            }, 100);
+          }
+        }
+      } else {
+        console.warn("[Result] Could not extract videoId from streamingUrl:", streamingUrl);
       }
-      console.log("[Result] Starting streaming analysis for URL:", streamingUrl);
-      startStreamingAnalysis(streamingUrl);
+
+      // 同时启动流式分析（不阻塞视频和 transcript 的显示）
+      if (!abortControllerRef.current) {
+        console.log("[Result] 📊 Starting streaming analysis in background for URL:", streamingUrl);
+        startStreamingAnalysis(streamingUrl);
+      }
+
       return () => {
         abortControllerRef.current?.abort();
       };
@@ -587,14 +949,20 @@ export default function Result() {
         "cached:",
         cached,
       );
+
+      // 存储 videoId 到 ref（用于播放器初始化）
+      if (!extractedVideoIdRef.current) {
+        extractedVideoIdRef.current = videoId;
+      }
+
       setPlayerReady(false); // 重置 player ready 状态
 
       // 如果有从 index.tsx 传过来的完整数据（翻译后的缓存数据），直接使用
-      if (initialSections && initialVideoInfo) {
+      if (initialMainBody && initialVideoInfo) {
         console.log("[Result] ✅ Using pre-loaded data from navigation state (translated)");
         setVideoData({
           videoInfo: initialVideoInfo,
-          sections: initialSections,
+          main_body: initialMainBody,
         });
         setLoading(false);
       } else {
@@ -605,10 +973,16 @@ export default function Result() {
       loadTranscript(videoId, isExample);
       if (isExample) {
         loadChapters(videoId); // 示例视频加载本地 chapters
-      } else {
-        loadComments(videoId, 20); // 非示例视频加载评论
       }
-      initializeYouTubePlayer();
+      // else {
+      //   loadComments(videoId, 20); // 非示例视频加载评论 - 已禁用
+      // }
+
+      // 初始化播放器（只执行一次）
+      if (!playerInitializedRef.current) {
+        playerInitializedRef.current = true;
+        initializeYouTubePlayer();
+      }
     } else if (!streamingUrl && !videoId) {
       console.warn("[Result] No videoId or streamingUrl provided");
       setLoading(false);
@@ -616,20 +990,78 @@ export default function Result() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isExample, streamingUrl]); // 移除 videoId 依赖，避免流式分析完成后重复触发
 
-  // 流式分析完成后，videoId 更新，初始化播放器和加载 transcript（只执行一次）
+  // 图像生成状态管理（现在图像生成是阻塞的，URL 会直接包含在 [DONE] 消息中）
   useEffect(() => {
-    if (streamingUrl && videoId && !isStreaming && !streamingInitializedRef.current) {
-      streamingInitializedRef.current = true;
-      console.log(
-        "[Result] Streaming complete, initializing player and loading transcript for:",
-        videoId,
-      );
-      initializeYouTubePlayer();
-      loadTranscript(videoId, false);
-      loadComments(videoId, 20);
+    if (!videoId || !videoData?.summary_box?.bullet_points) return;
+
+    // 如果已经有图像 URL，设置为完成状态
+    if (videoData.key_takeaways_image_url) {
+      setImageGenStatus({
+        status: "completed",
+        imageUrl: videoData.key_takeaways_image_url,
+      });
+    } else {
+      // 如果没有图像 URL，可能是生成失败或未生成
+      // 如果流式分析已完成，检查是否有图像生成失败的情况
+      if (!isStreaming) {
+        // 可以可选地查询一次数据库确认状态，但通常不需要
+        // 因为图像生成现在是阻塞的，如果没有 URL 就说明生成失败或未生成
+        setImageGenStatus({
+          status: "failed",
+          errorMessage: "图像生成失败或未生成",
+        });
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoId, isStreaming, streamingUrl]);
+  }, [
+    videoId,
+    videoData?.summary_box?.bullet_points,
+    videoData?.key_takeaways_image_url,
+    isStreaming,
+  ]);
+
+  // 搜索相关 YouTube 视频
+  useEffect(() => {
+    if (!videoData?.footer?.resources || videoData.footer.resources.length === 0) {
+      return;
+    }
+
+    const searchRelatedVideos = async () => {
+      setIsSearchingVideos(true);
+      const newVideos = new Map<string, YouTubeSearchResult>();
+
+      // 为每个 resource 搜索相关视频
+      for (const res of videoData.footer?.resources || []) {
+        if (!res.name || res.name.trim() === "") continue;
+
+        try {
+          console.log(`[Related Videos] Searching for: ${res.name}`);
+          const response = await searchYouTubeDataAPI(res.name, {
+            limit: 1, // 只取第一个结果
+            order: "viewCount",
+            duration: "any",
+            time_filter: undefined,
+          });
+
+          if (response.success && response.results.length > 0) {
+            newVideos.set(res.name, response.results[0]);
+            console.log(
+              `[Related Videos] Found video for "${res.name}":`,
+              response.results[0].title,
+            );
+          } else {
+            console.log(`[Related Videos] No results for "${res.name}"`);
+          }
+        } catch (error) {
+          console.error(`[Related Videos] Error searching for "${res.name}":`, error);
+        }
+      }
+
+      setRelatedVideos(newVideos);
+      setIsSearchingVideos(false);
+    };
+
+    searchRelatedVideos();
+  }, [videoData?.footer?.resources]);
 
   // 处理语言切换
   const handleLanguageChange = async (newLanguage: string) => {
@@ -706,7 +1138,7 @@ export default function Result() {
   // Load comment counts when video data is ready
   useEffect(() => {
     const loadCommentCounts = async () => {
-      if (!videoId || !videoData?.sections) return;
+      if (!videoId || !videoData?.main_body) return;
 
       // Load comment counts for all sentences
       const counts = await getAllCommentCounts(videoId);
@@ -715,7 +1147,89 @@ export default function Result() {
     };
 
     loadCommentCounts();
-  }, [videoId, videoData?.sections]);
+  }, [videoId, videoData?.main_body]);
+
+  // Load like status and count when video is ready
+  useEffect(() => {
+    const loadLikeStatus = async () => {
+      if (!videoId) return;
+
+      // Get like count
+      const count = await getVideoLikeCount(videoId);
+      setLikeCount(count);
+
+      // Check if user has liked (only if logged in)
+      if (user?.id) {
+        const liked = await checkUserLiked(videoId, user.id);
+        setIsLiked(liked);
+      }
+    };
+
+    loadLikeStatus();
+  }, [videoId, user?.id]);
+
+  // Load favorite status when video is ready
+  useEffect(() => {
+    const loadFavoriteStatus = async () => {
+      if (!videoId || !user?.id) {
+        setIsFavorited(false);
+        return;
+      }
+
+      const favorited = await checkUserFavorited(videoId, user.id);
+      setIsFavorited(favorited);
+    };
+
+    loadFavoriteStatus();
+  }, [videoId, user?.id]);
+
+  // Handle like button click
+  const handleLikeClick = async () => {
+    if (!videoId) return;
+
+    if (!user) {
+      // User not logged in, show a message or prompt login
+      alert("Please sign in to like videos");
+      return;
+    }
+
+    setIsLikeLoading(true);
+    try {
+      const result = await toggleVideoLike(videoId, user.id);
+      setIsLiked(result.liked);
+      setLikeCount(result.likeCount);
+    } catch (err) {
+      console.error("[Result] Error toggling like:", err);
+    } finally {
+      setIsLikeLoading(false);
+    }
+  };
+
+  // Handle favorite button click
+  const handleFavoriteClick = async () => {
+    if (!videoId) return;
+
+    if (!user) {
+      // User not logged in, show a message or prompt login
+      alert("Please sign in to save videos");
+      return;
+    }
+
+    setIsFavoriteLoading(true);
+    try {
+      const success = await toggleFavorite(videoId, user.id);
+      if (success) {
+        // Toggle the local state
+        setIsFavorited((prev) => !prev);
+      } else {
+        console.error("[Result] Failed to toggle favorite");
+      }
+    } catch (err) {
+      console.error("[Result] Error toggling favorite:", err);
+    } finally {
+      setIsFavoriteLoading(false);
+    }
+  };
 
   // Clip 播放列表监听器：自动切换到下一个 clip
   useEffect(() => {
@@ -757,7 +1271,6 @@ export default function Result() {
     }, 500);
 
     return () => clearInterval(checkProgress);
-     
   }, [clipPlaylist, player, playerReady]);
 
   // Load sidebar comments when selected sentence changes
@@ -787,8 +1300,9 @@ export default function Result() {
     loadSidebarComments();
   }, [selectedSentence]);
 
-  // Handle sentence selection for sidebar comments
-  const handleSentenceSelect = useCallback(
+  // Handle sentence selection for sidebar comments (currently unused)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _handleSentenceSelect = useCallback(
     (
       info: {
         videoId: string;
@@ -803,8 +1317,9 @@ export default function Result() {
     [],
   );
 
-  // Handle submitting a new comment from sidebar
-  const handleSubmitSidebarComment = async (e: React.FormEvent) => {
+  // Handle submitting a new comment from sidebar (currently unused)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _handleSubmitSidebarComment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSidebarComment.trim() || !selectedSentence) return;
 
@@ -837,8 +1352,9 @@ export default function Result() {
     }
   };
 
-  // Handle double-click on sentence to create/edit note
-  const handleSentenceDoubleClick = useCallback(
+  // Handle double-click on sentence to create/edit note (currently unused)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _handleSentenceDoubleClick = useCallback(
     (info: { sectionId: string; sentenceIndex: number; content: string }) => {
       // Check if there's already a note for this sentence
       const existingNote = notes.find(
@@ -920,6 +1436,12 @@ export default function Result() {
   };
 
   const loadTranscript = async (id: string, useLocalCache: boolean = false) => {
+    if (!id) {
+      console.warn("[Result] Cannot load transcript: no video ID provided");
+      setTranscriptData([]);
+      return;
+    }
+
     console.log("[Result] Loading transcript for:", id, "useLocalCache:", useLocalCache);
 
     // 如果是示例视频，优先使用本地缓存
@@ -957,9 +1479,11 @@ export default function Result() {
         return;
       } else {
         console.warn("[Result] API returned status:", response.status);
+        // 如果 API 返回错误，继续尝试 fallback
       }
     } catch (apiError) {
       console.error("[Result] ❌ API failed:", apiError);
+      // API 失败，继续尝试 fallback
     }
 
     // Fallback: load from local file
@@ -975,9 +1499,13 @@ export default function Result() {
         console.log("[Result] ✅ Local transcript loaded, entries:", parsed.length);
       } else {
         console.error("[Result] ❌ Local file not found, status:", localResponse.status);
+        // 所有方法都失败，设置空数组避免一直显示 loading
+        setTranscriptData([]);
       }
     } catch (localError) {
       console.error("[Result] ❌ Failed to load local transcript:", localError);
+      // 所有方法都失败，设置空数组避免一直显示 loading
+      setTranscriptData([]);
     }
   };
 
@@ -1114,6 +1642,8 @@ export default function Result() {
       // 扩展模式：使用沙盒 iframe
       console.log("[Result] Extension mode: using sandboxed player");
       // 沙盒播放器通过 postMessage 通信，在 useEffect 中设置监听
+      // 扩展模式下，iframe 会自动加载，所以立即设置为 ready
+      setPlayerReady(true);
       return;
     }
 
@@ -1135,8 +1665,24 @@ export default function Result() {
   const createPlayer = () => {
     const YT = window.YT;
     if (YT && YT.Player) {
+      // 使用当前的 videoId（优先使用 ref 中的值，因为它是从 streamingUrl 提取的，更可靠）
+      const currentVideoId = extractedVideoIdRef.current || videoId || paramVideoId;
+      if (!currentVideoId) {
+        console.warn("[Result] Cannot create player: no videoId available");
+        return;
+      }
+
+      // 检查是否已经存在播放器，如果存在先销毁
+      if (player && player.destroy) {
+        try {
+          player.destroy();
+        } catch (e) {
+          console.warn("[Result] Error destroying existing player:", e);
+        }
+      }
+
       const newPlayer = new YT.Player("youtube-player", {
-        videoId: videoId,
+        videoId: currentVideoId,
         playerVars: {
           modestbranding: 1,
           rel: 0,
@@ -1146,10 +1692,16 @@ export default function Result() {
             console.log("[Result] YouTube player ready");
             setPlayerReady(true);
           },
+          onError: (event: { data: number }) => {
+            console.error("[Result] YouTube player error:", event.data);
+            setError(`播放器错误: ${event.data}`);
+          },
         },
       });
       setPlayer(newPlayer);
-      console.log("[Result] YouTube player initialized");
+      console.log("[Result] YouTube player initialized with videoId:", currentVideoId);
+    } else {
+      console.warn("[Result] YouTube API not available yet");
     }
   };
 
@@ -1265,7 +1817,7 @@ export default function Result() {
     // 匹配多种时间戳格式:
     // 1. 📎 [06:45 - 07:05] 时间范围格式
     // 2. [MM:SS] 或 [HH:MM:SS] 单个时间戳格式
-    const timeRangeRegex = /📎?\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    const timeRangeRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
     const singleTimestampRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
 
     const parts: Array<{
@@ -1321,6 +1873,14 @@ export default function Result() {
       ...rangeMatches.map((m) => ({ ...m, type: "timeRange" as const })),
       ...singleMatches.map((m) => ({ ...m, type: "timestamp" as const })),
     ].sort((a, b) => a.index - b.index);
+
+    console.log(
+      "[Parse] Found",
+      rangeMatches.length,
+      "time ranges,",
+      singleMatches.length,
+      "single timestamps",
+    );
 
     let lastIndex = 0;
 
@@ -1393,6 +1953,147 @@ export default function Result() {
     }
   };
 
+  // Helper: Render text with clickable sentences (timestamps hidden)
+  // Text before [MM:SS] becomes clickable, timestamp is hidden
+  // 处理富文本节点，将整个句子高亮，并正确处理标点符号位置
+  const processClickableChildren = (children: React.ReactNode, jumpFn: (ts: string) => void) => {
+    // 1. 合并文本节点 (防止 React 将文本切碎导致正则失效)
+    const rawNodes = React.Children.toArray(children);
+    const mergedNodes: React.ReactNode[] = [];
+    rawNodes.forEach((node) => {
+      const lastNode = mergedNodes[mergedNodes.length - 1];
+      if (typeof node === "string" && typeof lastNode === "string") {
+        mergedNodes[mergedNodes.length - 1] = lastNode + node;
+      } else {
+        mergedNodes.push(node);
+      }
+    });
+
+    const result: React.ReactNode[] = [];
+    let buffer: React.ReactNode[] = [];
+    let keyIdx = 0;
+    let isFirstTextNode = true; // 标记是否是第一个文本节点
+
+    mergedNodes.forEach((node, nodeIdx) => {
+      if (typeof node === "string") {
+        // 移除文本开头的冒号（markdown 列表项格式问题）
+        let processedText = node;
+        if (isFirstTextNode && processedText.trimStart().startsWith(":")) {
+          // 如果是第一个文本节点且以冒号开头，移除开头的冒号和可能的空格
+          processedText = processedText.replace(/^\s*:\s*/, "");
+          isFirstTextNode = false; // 标记已处理过第一个文本节点
+        } else if (isFirstTextNode) {
+          isFirstTextNode = false;
+        }
+
+        // === 正则表达式详解 ===
+        // Group 1 (\s*): 捕获时间戳前面的空格（为了隐藏它）
+        // Group 2 (\[...\]): 捕获时间戳
+        // \s*: 忽略时间戳和标点之间的空格
+        // Group 3 ([...]*): 捕获紧跟在后面的标点
+        const tsPattern = /(\s*)\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*([.,;!?。，！？]*)/g;
+
+        let match;
+        let lastIndex = 0;
+
+        while ((match = tsPattern.exec(processedText)) !== null) {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const leadingSpace = match[1]; // " " (时间戳前的空格) - 保留用于未来使用
+          const timestamp = match[2]; // "01:30"
+          const punct = match[3]; // "." (标点)
+          const fullMatchLength = match[0].length;
+
+          // 1. 获取时间戳前的纯文本 (不包含那个被捕获的空格)
+          const textSegment = processedText.slice(lastIndex, match.index);
+          if (textSegment) buffer.push(textSegment);
+
+          // 2. 【关键】将标点符号立即放入 buffer (紧贴正文！)
+          // 这样 "Hello" + "." 就会变成 "Hello."，中间没有空格
+          if (punct) {
+            buffer.push(punct);
+          }
+
+          // 3. 结算：生成可点击的句子 (包含正文+标点)
+          // 此时 buffer 里的内容是 ["Hello", "."]
+          if (buffer.length > 0) {
+            result.push(
+              <span
+                key={`s-${keyIdx++}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  jumpFn(timestamp);
+                }}
+                className="group -mx-0.5 inline-block cursor-pointer rounded px-0.5 transition-colors hover:bg-blue-50/50 hover:text-blue-600"
+                title={`跳转到 ${timestamp}`}
+              >
+                {buffer.map((c, i) => (
+                  <React.Fragment key={i}>{c}</React.Fragment>
+                ))}
+              </span>,
+            );
+          }
+
+          // 4. 处理时间戳显示 (隐藏前导空格)
+          // 这里我们渲染一个不占位的空格(如果需要)和时间戳
+          // leadingSpace 被我们故意忽略了，或者你可以把它放在 hidden 类里
+          // result.push(
+          //    <span key={`ts-${keyIdx}`} className="text-gray-300 text-[10px] ml-1 select-none">
+          //      {/* 如果你想完全隐藏 " [01:30]"，给这个 span 加 `hidden` 类即可 */}
+          //      {/* 或者保留它但非常淡，作为视觉参考 */}
+          //      [{timestamp}]
+          //    </span>
+          // );
+
+          // 清空 buffer，更新指针
+          buffer = [];
+          lastIndex = match.index + fullMatchLength;
+        }
+
+        const remaining = processedText.slice(lastIndex);
+        if (remaining) buffer.push(remaining);
+      } else {
+        // 富文本节点
+        if (React.isValidElement(node)) {
+          buffer.push(React.cloneElement(node, { key: `node-${nodeIdx}` }));
+        } else {
+          buffer.push(node);
+        }
+      }
+    });
+
+    if (buffer.length > 0) {
+      result.push(
+        <span key="rest">
+          {buffer.map((c, i) => (
+            <React.Fragment key={i}>{c}</React.Fragment>
+          ))}
+        </span>,
+      );
+    }
+
+    return result;
+  };
+
+  // Custom ReactMarkdown components for clickable timestamps (富文本支持，整个句子高亮)
+  const markdownComponents = {
+    // Override paragraph to parse timestamps - use span for inline display (no line breaks between sentences)
+    p: ({ children }: React.HTMLAttributes<HTMLParagraphElement>) => (
+      <>{processClickableChildren(children, jumpToTimestamp)} </>
+    ),
+    // Override list items to parse timestamps
+    li: ({ children, ...props }: React.LiHTMLAttributes<HTMLLIElement>) => (
+      <li {...props}>{processClickableChildren(children, jumpToTimestamp)}</li>
+    ),
+    // Override strong to preserve and parse timestamps
+    strong: ({ children, ...props }: React.HTMLAttributes<HTMLElement>) => (
+      <strong {...props}>{processClickableChildren(children, jumpToTimestamp)}</strong>
+    ),
+    // Override em (italic) to preserve and parse timestamps
+    em: ({ children, ...props }: React.HTMLAttributes<HTMLElement>) => (
+      <em {...props}>{processClickableChildren(children, jumpToTimestamp)}</em>
+    ),
+  };
+
   // 开始播放 clips 列表
   const startClipPlayback = (clips: { startTime: number; endTime: number }[]) => {
     if (clips.length === 0) return;
@@ -1434,7 +2135,7 @@ export default function Result() {
           if (localResponse.ok) {
             const localData = await localResponse.json();
             console.log("[Result] ✅ Local cache loaded successfully");
-            console.log("[Result] Sections count:", localData.sections?.length || 0);
+            console.log("[Result] Main body sections count:", localData.main_body?.length || 0);
             setVideoData(localData);
             setLoading(false);
             return;
@@ -1466,13 +2167,20 @@ export default function Result() {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
+          // 如果是 404，说明视频数据不存在，自动触发分析
+          if (response.status === 404) {
+            console.log("[Result] 📹 Video data not found (404), starting automatic analysis...");
+            const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+            await startStreamingAnalysis(videoUrl);
+            return;
+          }
           throw new Error(`API returned ${response.status}`);
         }
 
         const data = await response.json();
         console.log("[Result] ✅ Video data loaded successfully");
         console.log("[Result] 📝 Video title:", data?.videoInfo?.title);
-        console.log("[Result] 📝 First section title:", data?.sections?.[0]?.title);
+        console.log("[Result] 📝 First section title:", data?.main_body?.[0]?.section_title);
         setVideoData(data);
         return;
       } catch (fetchError) {
@@ -1497,7 +2205,15 @@ export default function Result() {
         }
       } catch (localError) {
         console.error("[Result] Failed to load local data:", localError);
-        setError("Failed to load video data. Please try analyzing the video again.");
+        // 如果本地数据也不存在，自动触发分析
+        console.log("[Result] 📹 Local data not found, starting automatic analysis...");
+        const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+        try {
+          await startStreamingAnalysis(videoUrl);
+        } catch (analysisError) {
+          console.error("[Result] Failed to start analysis:", analysisError);
+          setError("Failed to load video data. Starting analysis...");
+        }
       }
     } finally {
       setLoading(false);
@@ -1554,7 +2270,8 @@ export default function Result() {
     }
   };
 
-  const loadComments = async (id: string, maxResults: number = 20) => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _loadComments = async (id: string, maxResults: number = 20) => {
     console.log("[Result] Loading comments for:", id);
     setCommentsLoading(true);
     setCommentsError(null);
@@ -1607,8 +2324,10 @@ export default function Result() {
         }),
       });
       const data = await response.json();
+      console.log("[Chat] Response received:", data);
 
       if (data.success) {
+        console.log("[Chat] Adding bot message:", data.response?.substring(0, 100) + "...");
         setChatMessages((prev) => [...prev, { type: "bot", content: data.response }]);
 
         // 自动播放 clips：提取响应中的时间片段并自动播放
@@ -1630,6 +2349,48 @@ export default function Result() {
           content: "Sorry, I'm having trouble processing your request. Please try again later.",
         },
       ]);
+    }
+  };
+
+  // 重新生成 Key Takeaways 图像
+  const handleRetryImageGeneration = async () => {
+    if (!videoId) return;
+
+    // 设置状态为 generating
+    setImageGenStatus({
+      status: "generating",
+    });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/generate-key-takeaways-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          video_id: videoId,
+          force_regenerate: true,
+        }),
+      });
+
+      const data = await response.json();
+      console.log("[ImageGen] Retry response:", data);
+
+      if (data.success && data.image_url) {
+        setImageGenStatus({
+          status: "completed",
+          imageUrl: data.image_url,
+        });
+      } else {
+        setImageGenStatus({
+          status: "failed",
+          errorMessage: data.error || data.message || "图像生成失败",
+        });
+      }
+    } catch (error) {
+      console.error("[ImageGen] Retry error:", error);
+      setImageGenStatus({
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "网络请求失败",
+      });
     } finally {
       setIsChatThinking(false);
     }
@@ -1668,6 +2429,21 @@ export default function Result() {
     }
   };
 
+  const handleShare = async () => {
+    if (!videoId) return;
+
+    // 构建分享连接
+    const shareUrl = `${window.location.origin}/result?v=${videoId}`;
+
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setIsShareCopied(true);
+      setTimeout(() => setIsShareCopied(false), 2000);
+    } catch (error) {
+      console.error("Failed to copy share link:", error);
+    }
+  };
+
   // 如果没有 videoId 且没有 streamingUrl，显示错误页面
   if (!videoId && !streamingUrl) {
     return (
@@ -1701,7 +2477,7 @@ export default function Result() {
   return (
     <div className="min-h-screen bg-[#faf9f5]">
       {/* Header */}
-      <header className="sticky top-0 z-10 border-b bg-white">
+      <header className="sticky top-0 z-10 bg-[#faf9f5]">
         <div className="mx-auto flex max-w-[1600px] items-center justify-between px-6 py-3">
           <Link to="/" className="flex items-center gap-2 text-gray-600 hover:text-gray-900">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1714,6 +2490,118 @@ export default function Result() {
             </svg>
             <span className="font-medium">Back</span>
           </Link>
+
+          {/* Actions - Collapsible Menu */}
+          <div className="flex flex-1 justify-end px-4">
+            <div className="group relative">
+              <button className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-100 text-gray-600 transition-colors hover:bg-gray-200">
+                <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M5 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm14 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm-7 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" />
+                </svg>
+              </button>
+
+              {/* Dropdown Menu */}
+              <div className="invisible absolute top-full right-0 z-50 mt-2 w-48 origin-top-right translate-y-2 transform rounded-xl border border-gray-200 bg-white p-1.5 opacity-0 shadow-lg transition-all duration-200 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
+                <div className="space-y-0.5">
+                  <button
+                    onClick={handleLikeClick}
+                    disabled={isLikeLoading}
+                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <div
+                      className={`flex h-8 w-8 items-center justify-center rounded-md ${isLiked ? "bg-red-50 text-red-500" : "bg-gray-100 text-gray-500"}`}
+                    >
+                      {isLikeLoading ? (
+                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24">
+                          <circle
+                            className="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            strokeWidth="4"
+                            fill="none"
+                          />
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                          />
+                        </svg>
+                      ) : (
+                        <svg
+                          className="h-4 w-4"
+                          fill={isLiked ? "currentColor" : "none"}
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
+                          />
+                        </svg>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-start">
+                      <span>{isLiked ? "Liked" : "Like"}</span>
+                      {likeCount > 0 && (
+                        <span className="text-xs text-gray-400">
+                          {likeCount} {likeCount === 1 ? "like" : "likes"}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={handleFavoriteClick}
+                    disabled={isFavoriteLoading}
+                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <div
+                      className={`flex h-8 w-8 items-center justify-center rounded-md ${isFavorited ? "bg-yellow-50 text-yellow-500" : "bg-gray-100 text-gray-500"}`}
+                    >
+                      {isFavoriteLoading ? (
+                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24">
+                          <circle
+                            className="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            strokeWidth="4"
+                            fill="none"
+                          />
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                          />
+                        </svg>
+                      ) : (
+                        <svg
+                          className="h-4 w-4"
+                          fill={isFavorited ? "currentColor" : "none"}
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+                          />
+                        </svg>
+                      )}
+                    </div>
+                    <span>{isFavorited ? "Saved" : "Add to Space"}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div className="flex items-center gap-3">
             {/* Language Selector */}
             <div className="language-selector relative">
@@ -1784,6 +2672,43 @@ export default function Result() {
                 </div>
               )}
             </div>
+            <Button
+              onClick={handleShare}
+              variant="outline"
+              className="flex items-center gap-2"
+              disabled={!videoId}
+            >
+              {isShareCopied ? (
+                <>
+                  <svg
+                    className="h-4 w-4 text-green-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M5 13l4 4L19 7"
+                    />
+                  </svg>
+                  <span className="text-green-600">Copied!</span>
+                </>
+              ) : (
+                <>
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
+                    />
+                  </svg>
+                  Share
+                </>
+              )}
+            </Button>
             <Button onClick={downloadPDF} variant="outline" className="flex items-center gap-2">
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
@@ -1795,6 +2720,9 @@ export default function Result() {
               </svg>
               Export PDF
             </Button>
+
+            {/* User Menu */}
+            <UserMenu />
           </div>
         </div>
       </header>
@@ -1804,47 +2732,84 @@ export default function Result() {
         <div className="flex gap-6">
           {/* Left Sidebar - Navigation & Comments */}
           <div className="w-[240px] flex-shrink-0">
-            <div className="sticky top-20 space-y-4">
+            <div className="sticky top-20 space-y-6">
               {/* Table of Contents */}
-              <div className="rounded-lg border bg-white p-4">
-                <div className="mb-3 text-xs font-medium tracking-wide text-gray-500 uppercase">
-                  Main Table of Contents
+              <div>
+                <div className="mb-3 text-xs font-semibold tracking-wide text-gray-400 uppercase">
+                  On This Page
                 </div>
-                <nav className="space-y-1">
-                  {videoData?.sections?.map((section, index) => (
-                    <a
-                      key={section.id}
-                      href={`#section-${section.id}`}
-                      className="block truncate rounded px-2 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
-                      title={section.title}
+                <nav className="space-y-2">
+                  {/* V2.0 Format: Use main_body sections */}
+                  {videoData?.main_body?.map((section, index) => (
+                    <div
+                      key={index}
+                      onClick={() => {
+                        const el = document.getElementById(`section-${index}`);
+                        el?.scrollIntoView({ behavior: "smooth" });
+                      }}
+                      className="group flex cursor-pointer items-start gap-2 rounded p-1 transition-colors hover:bg-gray-50"
+                      title={section.section_title}
                     >
-                      {index + 1}. {section.title}
-                    </a>
+                      {/* Thumbnail */}
+                      {section.thumbnail_url && (
+                        <div className="w-16 flex-shrink-0 overflow-hidden rounded">
+                          <img
+                            src={section.thumbnail_url}
+                            alt={section.section_title}
+                            className="h-9 w-16 object-cover transition-transform group-hover:scale-105"
+                          />
+                        </div>
+                      )}
+                      {/* Title & Timestamp */}
+                      <div className="min-w-0 flex-1">
+                        <div className="line-clamp-2 text-xs font-medium text-gray-800 group-hover:text-gray-900">
+                          {section.section_title}
+                        </div>
+                        {section.timestamp_ref && (
+                          <div className="mt-0.5 text-[10px] text-blue-500">
+                            {section.timestamp_ref}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   ))}
-                  {(!videoData?.sections || videoData.sections.length === 0) && (
-                    <p className="text-xs text-gray-400">加载中...</p>
+                  {(!videoData?.main_body || videoData.main_body.length === 0) && (
+                    <p className="text-xs text-gray-400">loading...</p>
                   )}
                 </nav>
               </div>
 
+              {/* Separator */}
+              <hr className="border-gray-200" />
+
               {/* Theme Table */}
-              <div className="rounded-lg border bg-white p-4">
+              <div>
                 <div className="mb-3 flex items-center justify-between">
-                  <span className="text-xs font-medium tracking-wide text-gray-500 uppercase">
+                  <span className="text-xs font-semibold tracking-wide text-gray-400 uppercase">
                     Theme Table
                   </span>
-                  {/* 返回主内容按钮
+                  {/* 返回主内容按钮 */}
                   {activeThemeId && (
                     <button
                       onClick={() => setActiveThemeId(null)}
                       className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-blue-600 transition-colors hover:bg-blue-50"
                     >
-                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                      <svg
+                        className="h-3 w-3"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M15 19l-7-7 7-7"
+                        />
                       </svg>
                       Back
                     </button>
-                  )} */}
+                  )}
                 </div>
                 <div className="space-y-1">
                   {themes.length > 0 ? (
@@ -1893,13 +2858,13 @@ export default function Result() {
                             ? "Generating themes..."
                             : "No themes"}
                       </p>
-                      {/* 生成主题按钮 */}
+                      {/* 生成主题按钮 - 支持 V2.0 (main_body) */}
                       {!isStreaming &&
                         !isLoadingThemes &&
                         !themesGenerated &&
                         videoId &&
-                        videoData?.sections &&
-                        videoData.sections.length > 0 && (
+                        videoData?.main_body &&
+                        videoData.main_body.length > 0 && (
                           <button
                             onClick={() => loadThemes(videoId)}
                             className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-gray-300 py-2 text-xs text-gray-500 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600"
@@ -1935,28 +2900,108 @@ export default function Result() {
 
           {/* Middle - Main Content */}
           <div className="min-w-0 flex-1 space-y-6">
-            {/* Video Information */}
-            <div className="rounded-lg bg-white p-6">
-              <h1 className="mb-3 text-2xl font-bold text-gray-900">
-                {videoData?.videoInfo?.title || title || "Video Analysis"}
-              </h1>
-              {videoData?.videoInfo?.summary && (
-                <p className="leading-relaxed text-gray-600">{videoData.videoInfo.summary}</p>
-              )}
-            </div>
+            {/* V2.0 Structured Article View */}
+            {videoData?.main_body ? (
+              activeThemeId ? (
+                // === Theme View ===
+                (() => {
+                  const activeTheme = themes.find((t) => t.id === activeThemeId);
+                  if (!activeTheme) return null;
 
-            {/* Content Sections / Theme View */}
-            <div className="rounded-lg border bg-white">
-              <div className="border-b px-6 py-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {activeThemeId && (
+                  // 将时间戳替换为播放器按钮
+                  const processTimestampButtons = (
+                    children: React.ReactNode,
+                    jumpFn: (ts: string) => void,
+                  ) => {
+                    const rawNodes = React.Children.toArray(children);
+                    const mergedNodes: React.ReactNode[] = [];
+                    rawNodes.forEach((node) => {
+                      const lastNode = mergedNodes[mergedNodes.length - 1];
+                      if (typeof node === "string" && typeof lastNode === "string") {
+                        mergedNodes[mergedNodes.length - 1] = lastNode + node;
+                      } else {
+                        mergedNodes.push(node);
+                      }
+                    });
+
+                    const result: React.ReactNode[] = [];
+                    let keyIdx = 0;
+
+                    mergedNodes.forEach((node, nodeIdx) => {
+                      if (typeof node === "string") {
+                        const tsPattern = /\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+                        let match;
+                        let lastIndex = 0;
+
+                        while ((match = tsPattern.exec(node)) !== null) {
+                          const timestamp = match[1];
+                          const textSegment = node.slice(lastIndex, match.index);
+                          if (textSegment) {
+                            result.push(
+                              <React.Fragment key={`t-${keyIdx++}`}>{textSegment}</React.Fragment>,
+                            );
+                          }
+                          result.push(
+                            <button
+                              key={`btn-${keyIdx++}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                jumpFn(timestamp);
+                              }}
+                              className="mx-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 align-middle text-blue-600 transition-all duration-200 hover:scale-110 hover:bg-blue-200 hover:text-blue-700"
+                              title={`跳转到 ${timestamp}`}
+                              type="button"
+                            >
+                              <svg
+                                className="ml-0.5 h-2.5 w-2.5"
+                                fill="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path d="M8 5v14l11-7z" />
+                              </svg>
+                            </button>,
+                          );
+                          lastIndex = match.index + match[0].length;
+                        }
+                        const remaining = node.slice(lastIndex);
+                        if (remaining) {
+                          result.push(
+                            <React.Fragment key={`t-${keyIdx++}`}>{remaining}</React.Fragment>,
+                          );
+                        }
+                      } else {
+                        if (React.isValidElement(node)) {
+                          result.push(React.cloneElement(node, { key: `node-${nodeIdx}` }));
+                        } else {
+                          result.push(node);
+                        }
+                      }
+                    });
+                    return result.length > 0 ? result : children;
+                  };
+
+                  const themeMarkdownComponents = {
+                    p: ({ children }: React.HTMLAttributes<HTMLParagraphElement>) => (
+                      <p className="mb-4 leading-relaxed text-gray-700">
+                        {processTimestampButtons(children, jumpToTimestamp)}
+                      </p>
+                    ),
+                    li: ({ children }: React.LiHTMLAttributes<HTMLLIElement>) => (
+                      <li className="mb-2 leading-relaxed text-gray-700">
+                        {processTimestampButtons(children, jumpToTimestamp)}
+                      </li>
+                    ),
+                  };
+
+                  return (
+                    <div>
+                      {/* Back Button */}
                       <button
                         onClick={() => setActiveThemeId(null)}
-                        className="flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50"
+                        className="mb-6 flex items-center gap-2 rounded-lg bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
                       >
                         <svg
-                          className="h-3 w-3"
+                          className="h-4 w-4"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
@@ -1968,59 +3013,9 @@ export default function Result() {
                             d="M15 19l-7-7 7-7"
                           />
                         </svg>
-                        Back
+                        Back to Main Content
                       </button>
-                    )}
-                    <div className="text-xs font-medium tracking-wide text-gray-500 uppercase">
-                      {activeThemeId
-                        ? `Theme: ${themes.find((t) => t.id === activeThemeId)?.title || ""}`
-                        : "Content Sections"}
-                    </div>
-                  </div>
-                  {activeThemeId && (
-                    <span
-                      className="h-3 w-3 rounded-full"
-                      style={{
-                        backgroundColor:
-                          themes.find((t) => t.id === activeThemeId)?.color || "#6366f1",
-                      }}
-                    />
-                  )}
-                </div>
-              </div>
 
-              {error ? (
-                <div className="p-12 text-center">
-                  <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-red-100">
-                    <svg
-                      className="h-8 w-8 text-red-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                      />
-                    </svg>
-                  </div>
-                  <p className="mb-4 text-gray-600">{error}</p>
-                  <Link to="/">
-                    <Button className="bg-blue-600 text-white hover:bg-blue-700">
-                      Return to Home
-                    </Button>
-                  </Link>
-                </div>
-              ) : activeThemeId ? (
-                // === Theme View ===
-                (() => {
-                  const activeTheme = themes.find((t) => t.id === activeThemeId);
-                  if (!activeTheme) return null;
-
-                  return (
-                    <div className="p-6">
                       {/* Theme Header */}
                       <div
                         className="mb-6 rounded-lg border-l-4 bg-gray-50 p-4"
@@ -2035,20 +3030,284 @@ export default function Result() {
                         </p>
                       </div>
 
-                      {/* Theme Content */}
-                      <div className="space-y-4">
+                      {/* Theme Content - Nextra Steps Style */}
+                      <div className="nextra-steps">
                         {activeTheme.content?.map((item, index) => (
                           <div
                             key={index}
-                            className="group flex gap-4 rounded-lg border border-gray-100 p-4 transition-colors hover:border-gray-200 hover:bg-gray-50"
+                            className={`relative pb-6 pl-10 ${
+                              index < (activeTheme.content?.length ?? 0) - 1
+                                ? "after:absolute after:top-8 after:left-[13px] after:h-[calc(100%-1.5rem)] after:w-[2px] after:bg-gray-200"
+                                : ""
+                            }`}
                           >
-                            {/* Timestamp */}
-                            <button
-                              onClick={() => jumpToTimestamp(item.timestampStart)}
-                              className="flex h-8 flex-shrink-0 items-center gap-1 rounded-lg bg-gray-100 px-3 font-mono text-xs text-gray-600 transition-colors hover:bg-blue-100 hover:text-blue-700"
+                            {/* Step Number */}
+                            <div
+                              className="absolute top-0 left-0 flex h-7 w-7 items-center justify-center rounded-md text-sm font-semibold text-white"
+                              style={{ backgroundColor: activeTheme.color || "#6366f1" }}
                             >
+                              {index + 1}
+                            </div>
+
+                            {/* Content Text */}
+                            <div className="prose prose-sm prose-gray prose-p:text-[15px] prose-p:text-gray-700 prose-p:leading-7 prose-p:my-3 prose-headings:font-semibold prose-headings:text-gray-900 prose-headings:mt-4 prose-headings:mb-2 prose-strong:text-gray-900 prose-strong:font-bold prose-ul:my-3 prose-ul:pl-0 prose-ul:list-none prose-ol:my-3 prose-ol:pl-0 prose-li:relative prose-li:pl-5 prose-li:my-2 prose-li:text-[15px] prose-li:leading-7 prose-li:text-gray-700 prose-blockquote:border-l-2 prose-blockquote:border-gray-300 prose-blockquote:bg-[rgb(250,249,245)] prose-blockquote:py-2 prose-blockquote:px-3 prose-blockquote:my-3 prose-blockquote:rounded-r prose-blockquote:text-gray-700 prose-blockquote:text-sm prose-code:rounded prose-code:bg-[rgb(250,249,245)] prose-code:px-1.5 prose-code:py-0.5 prose-code:text-xs prose-code:font-mono prose-code:text-gray-800 prose-a:text-blue-600 prose-a:font-medium prose-a:no-underline hover:prose-a:underline hover:prose-a:text-blue-700 max-w-none [&_ul>li]:before:absolute [&_ul>li]:before:left-0 [&_ul>li]:before:font-bold [&_ul>li]:before:text-gray-400 [&_ul>li]:before:content-['•']">
+                              <ReactMarkdown components={themeMarkdownComponents}>
+                                {item.content}
+                              </ReactMarkdown>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                /* Nextra-style Documentation */
+                <article className="nextra-content">
+                  {/* Nextra Header */}
+                  <header className="mb-8">
+                    {/* Title */}
+                    <h1 className="text-4xl font-bold tracking-tight text-gray-900">
+                      {videoData?.meta?.title}
+                    </h1>
+
+                    {/* Description */}
+                    {videoData?.summary_box && (
+                      <p className="mt-4 text-lg leading-relaxed text-gray-600">
+                        {videoData.summary_box.key_insight}
+                      </p>
+                    )}
+                  </header>
+
+                  {/* Nextra Callout - Key Insight */}
+                  {videoData?.header_hook && (
+                    <div
+                      className="nextra-callout mb-8 flex rounded-lg border border-gray-200 p-4"
+                      style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm leading-relaxed text-gray-700">
+                          {videoData.header_hook.quote}
+                          {videoData.header_hook.author && (
+                            <span className="ml-2 text-gray-600">
+                              — {videoData.header_hook.author}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Summary Points - Nextra style list */}
+                  {videoData?.summary_box?.bullet_points &&
+                    videoData.summary_box.bullet_points.length > 0 && (
+                      <div className="mb-8">
+                        <h2 className="mb-4 text-2xl font-semibold tracking-tight text-gray-900">
+                          Key Takeaways
+                        </h2>
+                        <ul className="space-y-2">
+                          {videoData.summary_box.bullet_points.map((point, i) => (
+                            <li key={i} className="flex items-start gap-3 text-gray-600">
+                              <span className="mt-1.5 flex h-2 w-2 flex-shrink-0 rounded-full bg-gray-500"></span>
+                              <span className="leading-relaxed">{point}</span>
+                            </li>
+                          ))}
+                        </ul>
+
+                        {/* Key Takeaways Image */}
+                        {videoData.key_takeaways_image_url ||
+                        imageGenStatus?.status === "completed" ? (
+                          // 图像生成成功，直接显示
+                          <div className="mt-6">
+                            <img
+                              src={videoData.key_takeaways_image_url || imageGenStatus?.imageUrl}
+                              alt="Key Takeaways Visual Summary"
+                              className="w-full rounded-lg border border-gray-200 shadow-sm transition-transform hover:scale-[1.01]"
+                            />
+                            <p className="mt-2 text-center text-xs text-gray-400">
+                              Visual summary generated by AI
+                            </p>
+                          </div>
+                        ) : imageGenStatus?.status === "generating" ? (
+                          // 图像正在生成中
+                          <div
+                            className="mt-6 flex flex-col items-center justify-center rounded-lg border border-gray-200 px-6 py-8"
+                            style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                          >
+                            <svg
+                              className="mb-3 h-10 w-10 animate-spin text-blue-500"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <circle
+                                className="opacity-25"
+                                cx="12"
+                                cy="12"
+                                r="10"
+                                stroke="currentColor"
+                                strokeWidth="4"
+                              />
+                              <path
+                                className="opacity-75"
+                                fill="currentColor"
+                                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                              />
+                            </svg>
+                            <p className="mb-1 text-sm font-medium text-gray-700">
+                              Generating image...
+                            </p>
+                            <p className="text-xs text-gray-500">This may take a few seconds</p>
+                          </div>
+                        ) : imageGenStatus?.status === "failed" ? (
+                          // 图像生成失败（仅在明确失败时显示）
+                          <div
+                            className="mt-6 flex flex-col items-center justify-center rounded-lg border border-gray-200 px-6 py-8"
+                            style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                          >
+                            <svg
+                              className="mb-3 h-10 w-10 text-gray-500"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                              />
+                            </svg>
+                            <p className="mb-1 text-sm font-medium text-gray-700">
+                              generate image failed
+                            </p>
+                            <button
+                              className="mt-2 rounded-md bg-blue-400 px-2 py-1 text-white hover:bg-blue-600"
+                              onClick={handleRetryImageGeneration}
+                            >
+                              Retry
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+
+                  {/* Core Concepts module removed */}
+
+                  {/* Main Content Sections - Nextra Steps Style */}
+                  <div className="nextra-steps">
+                    {videoData?.main_body?.map((section, idx) => (
+                      <section
+                        key={idx}
+                        id={`section-${idx}`}
+                        className="nextra-step relative mb-10 scroll-mt-20 pl-10 before:absolute before:top-0 before:left-0 before:flex before:h-7 before:w-7 before:items-center before:justify-center before:rounded-md before:bg-gray-200 before:text-sm before:font-semibold before:text-gray-600 before:content-[attr(data-step)]"
+                        data-step={idx + 1}
+                      >
+                        {/* Section heading */}
+                        <div className="mb-4 flex items-center justify-between">
+                          <h2 className="text-xl font-semibold tracking-tight text-gray-900 hover:text-blue-600">
+                            <a href={`#section-${idx}`} className="group flex items-center">
+                              {section.section_title}
+                              <span className="ml-2 text-gray-400 opacity-0 transition-opacity group-hover:opacity-100">
+                                #
+                              </span>
+                            </a>
+                          </h2>
+                          {section.timestamp_ref && (
+                            <button
+                              onClick={() => jumpToTimestamp(section.timestamp_ref)}
+                              className="flex items-center gap-1.5 rounded-md bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-blue-100 hover:text-blue-700"
+                            >
+                              <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z" />
+                              </svg>
+                              {section.timestamp_ref}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Prose content - Rich Markdown rendering */}
+                        <div className="prose prose-lg prose-gray prose-headings:font-bold prose-headings:tracking-tight prose-headings:text-gray-900 prose-h1:text-3xl prose-h1:mt-8 prose-h1:mb-4 prose-h1:border-b prose-h1:border-gray-200 prose-h1:pb-3 prose-h2:text-2xl prose-h2:mt-7 prose-h2:mb-3 prose-h3:text-xl prose-h3:mt-6 prose-h3:mb-3 prose-h3:text-gray-800 prose-h4:text-lg prose-h4:mt-5 prose-h4:mb-2 prose-ul:my-4 prose-ol:my-4 prose-li:text-gray-700 prose-li:my-2 prose-li:leading-7 prose-blockquote:border-l-4 prose-blockquote:border-gray-300 prose-blockquote:bg-[rgb(250,249,245)] prose-blockquote:py-2 prose-blockquote:px-4 prose-blockquote:my-6 prose-blockquote:rounded-r-lg prose-blockquote:text-gray-700 prose-blockquote:not-italic prose-blockquote:font-normal prose-strong:text-gray-900 prose-strong:font-bold prose-code:rounded-md prose-code:bg-[rgb(250,249,245)] prose-code:px-2 prose-code:py-1 prose-code:text-sm prose-code:font-mono prose-code:text-gray-800 prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-[rgb(250,249,245)] prose-pre:text-gray-800 prose-pre:rounded-lg prose-pre:p-4 prose-pre:overflow-x-auto prose-a:text-blue-600 prose-a:font-medium prose-a:no-underline hover:prose-a:underline hover:prose-a:text-blue-700 prose-a:decoration-2 prose-a:underline-offset-2 prose-img:rounded-lg prose-img:shadow-md prose-img:my-6 prose-hr:border-gray-300 prose-hr:my-8 prose-table:border-collapse prose-table:my-6 prose-th:border prose-th:border-gray-300 prose-th:bg-[rgb(250,249,245)] prose-th:px-4 prose-th:py-2 prose-th:text-left prose-th:font-semibold prose-td:border prose-td:border-gray-300 prose-td:px-4 prose-td:py-2 max-w-none leading-8 text-gray-700 [&>span]:inline">
+                          <ReactMarkdown components={markdownComponents}>
+                            {section.content_markdown}
+                          </ReactMarkdown>
+                        </div>
+
+                        {/* Visual break - simple text display */}
+                        {section.visual_break && (
+                          <div className="mt-6">
+                            <p className="text-sm leading-relaxed text-gray-700">
+                              {section.visual_break.content}
+                            </p>
+                          </div>
+                        )}
+                      </section>
+                    ))}
+                  </div>
+
+                  {/* Visual Summary Chart - ASCII Art */}
+                  {videoData?.visual_summary_chart?.ascii_art && (
+                    <section className="mb-8">
+                      <div className="mb-4 flex items-center justify-between">
+                        {videoData.visual_summary_chart.title && (
+                          <h2 className="text-2xl font-semibold tracking-tight text-gray-900">
+                            {videoData.visual_summary_chart.title}
+                          </h2>
+                        )}
+                        <button
+                          onClick={async () => {
+                            if (!videoData?.visual_summary_chart?.ascii_art) return;
+                            const text = videoData.visual_summary_chart.ascii_art;
+                            try {
+                              // 优先使用 Clipboard API
+                              if (navigator.clipboard && window.isSecureContext) {
+                                await navigator.clipboard.writeText(text);
+                              } else {
+                                // Fallback: 使用传统方法
+                                const textArea = document.createElement("textarea");
+                                textArea.value = text;
+                                textArea.style.position = "fixed";
+                                textArea.style.left = "-9999px";
+                                textArea.style.top = "-9999px";
+                                document.body.appendChild(textArea);
+                                textArea.focus();
+                                textArea.select();
+                                document.execCommand("copy");
+                                document.body.removeChild(textArea);
+                              }
+                              setIsCopied(true);
+                              setTimeout(() => setIsCopied(false), 2000);
+                            } catch (err) {
+                              console.error("Failed to copy:", err);
+                              // 再次尝试 fallback
+                              try {
+                                const textArea = document.createElement("textarea");
+                                textArea.value = text;
+                                textArea.style.position = "fixed";
+                                textArea.style.left = "-9999px";
+                                document.body.appendChild(textArea);
+                                textArea.select();
+                                document.execCommand("copy");
+                                document.body.removeChild(textArea);
+                                setIsCopied(true);
+                                setTimeout(() => setIsCopied(false), 2000);
+                              } catch {
+                                alert("复制失败，请手动复制");
+                              }
+                            }
+                          }}
+                          className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                            isCopied
+                              ? "border-gray-300 text-gray-700"
+                              : "border-gray-300 text-gray-700 hover:opacity-80"
+                          }`}
+                          style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                          title="Copy ASCII art"
+                        >
+                          {isCopied ? (
+                            <>
                               <svg
-                                className="h-3 w-3"
+                                className="h-4 w-4"
                                 fill="none"
                                 stroke="currentColor"
                                 viewBox="0 0 24 24"
@@ -2057,209 +3316,332 @@ export default function Result() {
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
                                   strokeWidth={2}
-                                  d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+                                  d="M5 13l4 4L19 7"
                                 />
+                              </svg>
+                              <span>Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg
+                                className="h-4 w-4"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
                                 <path
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
                                   strokeWidth={2}
-                                  d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                  d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
                                 />
                               </svg>
-                              {item.timestampStart}
-                            </button>
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      <div
+                        className="rounded-lg border border-gray-200 p-6"
+                        style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                      >
+                        <div className="flex justify-center overflow-x-auto">
+                          <pre className="font-mono text-sm leading-relaxed whitespace-pre text-gray-800">
+                            {videoData.visual_summary_chart.ascii_art}
+                          </pre>
+                        </div>
+                      </div>
+                    </section>
+                  )}
 
-                            {/* Content */}
-                            <div className="flex-1">
-                              <p className="text-sm leading-relaxed text-gray-700">
-                                {item.content}
-                              </p>
-                            </div>
+                  {/* Nextra Separator */}
+                  <hr className="my-8 border-gray-200" />
 
-                            {/* Index badge */}
-                            <span
-                              className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-medium text-white"
-                              style={{ backgroundColor: activeTheme.color || "#6366f1" }}
+                  {/* Deep Analysis - Nextra Tabs style */}
+                  {videoData?.deep_analysis && (
+                    <section className="mb-8">
+                      <h2 className="mb-4 text-2xl font-semibold tracking-tight text-gray-900">
+                        Deep Analysis
+                      </h2>
+
+                      {/* Nextra Callout - Info */}
+                      <div
+                        className="nextra-callout mb-6 flex rounded-lg border border-gray-200 p-4"
+                        style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-gray-700">
+                            Expand sections below for detailed explanations and logic diagrams.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Diagram toggle */}
+                      <details className="group mb-6 overflow-hidden rounded-lg border border-gray-200">
+                        <summary
+                          className="flex cursor-pointer items-center gap-3 px-4 py-3 font-medium text-gray-900 hover:opacity-80"
+                          style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                        >
+                          <svg
+                            className="h-5 w-5 text-gray-500 transition-transform group-open:rotate-90"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M9 5l7 7-7 7"
+                            />
+                          </svg>
+                          Logic Flow Diagram
+                        </summary>
+                        <div
+                          className="border-t border-gray-200 p-4"
+                          style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                        >
+                          <MermaidChart
+                            chart={videoData.deep_analysis.mermaid_graph}
+                            className="min-h-[200px]"
+                          />
+                        </div>
+                      </details>
+
+                      {/* Deep Points - Nextra accordion */}
+                      <div className="space-y-3">
+                        {videoData.deep_analysis.deep_points.map((point, i) => (
+                          <details
+                            key={i}
+                            className="group overflow-hidden rounded-lg border border-gray-200"
+                          >
+                            <summary
+                              className="flex cursor-pointer items-center gap-3 px-4 py-3 font-medium text-gray-900 hover:opacity-80"
+                              style={{ backgroundColor: "rgb(250, 249, 245)" }}
                             >
-                              {index + 1}
-                            </span>
-                          </div>
+                              <svg
+                                className="h-4 w-4 text-gray-500 transition-transform group-open:rotate-90"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M9 5l7 7-7 7"
+                                />
+                              </svg>
+                              {point.title}
+                            </summary>
+                            <div
+                              className="border-t border-gray-200 px-4 py-4"
+                              style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                            >
+                              <p className="mb-3 leading-relaxed text-gray-600">
+                                {point.detailed_explanation}
+                              </p>
+                              <blockquote className="border-l-2 border-gray-300 pl-4 text-sm text-gray-500 italic">
+                                "{point.evidence_quote}"
+                              </blockquote>
+                            </div>
+                          </details>
                         ))}
                       </div>
-                    </div>
-                  );
-                })()
-              ) : !videoData?.sections || videoData.sections.length === 0 ? (
-                <div className="p-12 text-center">
-                  {isStreaming ? (
-                    <div className="flex items-center justify-center gap-3">
-                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"></div>
-                      <p className="text-gray-600">AI Analyzing video content...</p>
-                    </div>
-                  ) : (
-                    <p className="text-gray-600">No content sections available</p>
+                    </section>
                   )}
-                </div>
-              ) : (
-                <div className="divide-y">
-                  {videoData?.sections?.map((section) => {
-                    // 根据 section 中间 content 的时间戳找到对应的 chapter
-                    let matchedChapter: Chapter | undefined;
 
-                    if (
-                      chapters &&
-                      chapters.length > 0 &&
-                      section.content &&
-                      section.content.length > 0
-                    ) {
-                      // 获取 section 中间 content 的时间戳并转换为秒数
-                      const midIndex = Math.floor(section.content.length / 2);
-                      const midTimestamp = section.content[midIndex].timestampStart;
-                      const parts = midTimestamp.split(":").map(Number);
-                      let sectionMidSeconds = 0;
-                      if (parts.length === 2) {
-                        sectionMidSeconds = parts[0] * 60 + parts[1];
-                      } else if (parts.length === 3) {
-                        sectionMidSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
-                      }
-
-                      // 找到时间戳小于等于 section 中间时间的最后一个 chapter
-                      for (let i = chapters.length - 1; i >= 0; i--) {
-                        if (chapters[i].timestamp <= sectionMidSeconds) {
-                          matchedChapter = chapters[i];
-                          break;
-                        }
-                      }
-
-                      // 如果没找到（section 时间早于所有 chapter），使用第一个 chapter
-                      if (!matchedChapter && chapters.length > 0) {
-                        matchedChapter = chapters[0];
-                      }
-                    }
-
-                    return (
-                      <div
-                        key={section.id}
-                        id={`section-${section.id}`}
-                        className="scroll-mt-20 p-6"
-                      >
-                        {/* Section Header with Thumbnail */}
-                        <div className="mb-4 flex gap-4">
-                          {/* Chapter Thumbnail */}
-                          {matchedChapter && (
-                            <div
-                              onClick={() => {
-                                const minutes = Math.floor(matchedChapter.timestamp / 60);
-                                const seconds = matchedChapter.timestamp % 60;
-                                const timeStr = `${minutes}:${seconds.toString().padStart(2, "0")}`;
-                                jumpToTimestamp(timeStr);
-                              }}
-                              className="group relative w-40 flex-shrink-0 cursor-pointer overflow-hidden rounded-lg"
+                  {/* Q&A Section - Nextra FAQ style */}
+                  {videoData?.qa_interactions && videoData.qa_interactions.length > 0 && (
+                    <section className="mb-8">
+                      <h2 className="mb-4 text-2xl font-semibold tracking-tight text-gray-900">
+                        Questions and Answers
+                      </h2>
+                      <div className="divide-y divide-gray-200 rounded-lg border border-gray-200">
+                        {videoData.qa_interactions.map((qa, i) => (
+                          <details key={i} className="group">
+                            <summary
+                              className="flex cursor-pointer items-center justify-between px-4 py-4 font-medium text-gray-900 hover:opacity-80"
+                              style={{ backgroundColor: "rgb(250, 249, 245)" }}
                             >
-                              <div className="aspect-video bg-gray-100">
-                                {matchedChapter.thumbnail_url ? (
-                                  <img
-                                    src={matchedChapter.thumbnail_url}
-                                    alt={matchedChapter.title}
-                                    className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                              <span className="pr-4">{qa.question}</span>
+                              <svg
+                                className="h-5 w-5 flex-shrink-0 text-gray-500 transition-transform group-open:rotate-180"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M19 9l-7 7-7-7"
+                                />
+                              </svg>
+                            </summary>
+                            <div
+                              className="border-t border-gray-100 px-4 py-4"
+                              style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                            >
+                              <p className="leading-relaxed text-gray-600">{qa.answer}</p>
+                              <span
+                                className="mt-3 inline-block rounded-full border border-gray-300 px-2.5 py-0.5 text-xs font-medium text-gray-600"
+                                style={{ backgroundColor: "rgb(250, 249, 245)" }}
+                              >
+                                {qa.type}
+                              </span>
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Footer - Nextra style */}
+                  {videoData?.footer && (
+                    <footer className="mt-12 space-y-8">
+                      {/* Related YouTube Videos */}
+                      {videoData?.footer?.resources && videoData.footer.resources.length > 0 && (
+                        <div>
+                          <h3 className="mb-4 text-lg font-semibold text-gray-900">
+                            Related Videos
+                          </h3>
+                          {isSearchingVideos ? (
+                            <div className="flex items-center justify-center py-8">
+                              <div className="flex items-center gap-2 text-gray-500">
+                                <svg
+                                  className="h-5 w-5 animate-spin"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <circle
+                                    className="opacity-25"
+                                    cx="12"
+                                    cy="12"
+                                    r="10"
+                                    stroke="currentColor"
+                                    strokeWidth="4"
                                   />
-                                ) : (
-                                  <div className="flex h-full w-full items-center justify-center bg-gray-200">
-                                    <svg
-                                      className="h-6 w-6 text-gray-400"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      viewBox="0 0 24 24"
-                                    >
-                                      <path
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                        strokeWidth={2}
-                                        d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
-                                      />
-                                      <path
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                        strokeWidth={2}
-                                        d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                                      />
-                                    </svg>
-                                  </div>
-                                )}
-                                {/* Timestamp Badge */}
-                                <div className="absolute right-1 bottom-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">
-                                  {Math.floor(matchedChapter.timestamp / 60)}:
-                                  {(matchedChapter.timestamp % 60).toString().padStart(2, "0")}
-                                </div>
-                                {/* Play overlay on hover */}
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/40">
-                                  <svg
-                                    className="h-8 w-8 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                                  <path
+                                    className="opacity-75"
                                     fill="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path d="M8 5v14l11-7z" />
-                                  </svg>
-                                </div>
+                                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                                  />
+                                </svg>
+                                <span className="text-sm">Searching related videos...</span>
                               </div>
                             </div>
+                          ) : (
+                            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                              {videoData.footer.resources
+                                .map((res) => {
+                                  const video = relatedVideos.get(res.name);
+                                  if (!video) return null;
+
+                                  return (
+                                    <a
+                                      key={res.name}
+                                      href={`/result?v=${video.videoId}`}
+                                      className="group block rounded-lg border border-gray-200 p-4 transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md"
+                                    >
+                                      <div className="flex items-start gap-3">
+                                        <div className="min-w-0 flex-1">
+                                          <p className="line-clamp-2 font-medium text-gray-900 group-hover:text-blue-600">
+                                            {video.title}
+                                          </p>
+                                          {video.channel && (
+                                            <p className="mt-1 text-xs text-gray-500">
+                                              {video.channel}
+                                            </p>
+                                          )}
+                                          {video.length && (
+                                            <p className="mt-1 text-xs text-gray-400">
+                                              {video.length}
+                                            </p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </a>
+                                  );
+                                })
+                                .filter(Boolean)}
+                            </div>
                           )}
-
-                          {/* Section Title */}
-                          <div className="flex-1 border-b border-gray-100 pb-3">
-                            <h2 className="text-lg font-bold text-gray-900">{section.title}</h2>
-                            {matchedChapter && matchedChapter.title !== section.title && (
-                              <p className="mt-1 text-xs text-gray-500">
-                                Chapter: {matchedChapter.title}
-                              </p>
-                            )}
-                          </div>
+                          {!isSearchingVideos && relatedVideos.size === 0 && (
+                            <p className="py-4 text-center text-sm text-gray-500">
+                              No related videos found
+                            </p>
+                          )}
                         </div>
-
-                        {/* Section Content with Interactive Comments */}
-                        <p className="text-sm leading-relaxed text-gray-700">
-                          {section.content?.map((item, itemIndex) => {
-                            const commentKey = `${section.id}-${itemIndex}`;
-                            const commentCount = sentenceCommentCounts.get(commentKey) || 0;
-                            const isSelected =
-                              selectedSentence?.sectionId === section.id &&
-                              selectedSentence?.sentenceIndex === itemIndex;
-                            const hasNote = notes.some(
-                              (n) => n.sectionId === section.id && n.sentenceIndex === itemIndex,
-                            );
-
-                            return (
-                              <span key={itemIndex}>
-                                <SentenceWithComments
-                                  videoId={videoId || ""}
-                                  sectionId={section.id}
-                                  sentenceIndex={itemIndex}
-                                  content={item.content}
-                                  timestampStart={item.timestampStart}
-                                  commentCount={commentCount}
-                                  hasNote={hasNote}
-                                  isSelected={isSelected}
-                                  onTimestampClick={jumpToTimestamp}
-                                  onSentenceSelect={handleSentenceSelect}
-                                  onDoubleClick={handleSentenceDoubleClick}
+                      )}
+                      {/* Next Steps - Nextra Callout */}
+                      {/* {videoData.footer.actionable_next_steps && videoData.footer.actionable_next_steps.length > 0 && (
+                        <div className="nextra-callout rounded-lg border border-green-200 bg-green-50 p-4">
+                          <h3 className="mb-3 flex items-center gap-2 font-semibold text-green-900">
+                            <span className="text-xl">✅</span>
+                            Next Steps
+                          </h3>
+                          <ul className="space-y-2">
+                            {videoData.footer.actionable_next_steps.map((step, i) => (
+                              <li key={i} className="flex items-start gap-3 text-green-800">
+                                <input
+                                  type="checkbox"
+                                  className="mt-1 h-4 w-4 rounded border-green-400 text-green-600 focus:ring-green-500"
                                 />
-                                {itemIndex < (section.content?.length || 0) - 1 && " "}
-                              </span>
-                            );
-                          })}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                                <span className="leading-relaxed">{step}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )} */}
+                    </footer>
+                  )}
+                </article>
+              )
+            ) : (
+              // Loading / No Content State
+              <div className="rounded-lg border p-4 text-center">
+                {isStreaming ? (
+                  <div className="flex items-center justify-center gap-3">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"></div>
+                    <p className="text-gray-600">AI Analyzing video content...</p>
+                  </div>
+                ) : error ? (
+                  <>
+                    <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-red-100">
+                      <svg
+                        className="h-8 w-8 text-red-600"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      </svg>
+                    </div>
+                    <p className="mb-4 text-gray-600">{error}</p>
+                    <Link to="/">
+                      <Button className="bg-blue-600 text-white hover:bg-blue-700">
+                        Return to Home
+                      </Button>
+                    </Link>
+                  </>
+                ) : (
+                  <p className="text-gray-600">No content available</p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Right Sidebar - Video & Tabs */}
-          <div className="w-[420px] flex-shrink-0 space-y-4">
+          <div className="w-[420px] flex-shrink-0">
             {/* Video Player */}
-            <div className="sticky top-20 overflow-visible rounded-lg border bg-white">
+            <div className="sticky top-20 overflow-visible">
               <div className="relative aspect-video bg-black">
                 {/* Clip 播放进度指示器 - 始终渲染，用 CSS 控制显示以避免 React DOM 冲突 */}
                 <div
@@ -2283,7 +3665,7 @@ export default function Result() {
                     </svg>
                   </button>
                 </div>
-                {!videoId ? (
+                {!(extractedVideoIdRef.current || videoId || paramVideoId) ? (
                   // 流式分析中，videoId 尚未获取
                   <div className="flex h-full w-full items-center justify-center bg-gray-900">
                     <div className="text-center">
@@ -2312,7 +3694,8 @@ export default function Result() {
                 ) : isExtension ? (
                   <iframe
                     ref={youtubeIframeRef}
-                    src={`https://www.youtube.com/embed/${videoId}?modestbranding=1&rel=0${youtubeStartTime > 0 ? `&start=${Math.floor(youtubeStartTime)}&autoplay=1` : ""}`}
+                    key={extractedVideoIdRef.current || videoId || paramVideoId || "no-video"}
+                    src={`https://www.youtube.com/embed/${extractedVideoIdRef.current || videoId || paramVideoId || ""}?modestbranding=1&rel=0${youtubeStartTime > 0 ? `&start=${Math.floor(youtubeStartTime)}&autoplay=1` : ""}`}
                     className="h-full w-full border-0"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                     allowFullScreen
@@ -2339,7 +3722,7 @@ export default function Result() {
                   className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
                     activeTab === "transcript"
                       ? "border-b-2 border-gray-900 text-gray-900"
-                      : "text-gray-600 hover:text-gray-900"
+                      : "text-gray-600"
                   }`}
                 >
                   Transcript
@@ -2372,7 +3755,10 @@ export default function Result() {
               </div>
 
               {/* Tab Content */}
-              <div ref={transcriptContainerRef} className="h-[400px] overflow-y-auto">
+              <div
+                ref={transcriptContainerRef}
+                className="h-[400px] overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 hover:[&::-webkit-scrollbar-thumb]:bg-gray-400 [&::-webkit-scrollbar-track]:bg-transparent"
+              >
                 {/* Transcript Tab */}
                 {activeTab === "transcript" && (
                   <div className="space-y-3 p-4">
@@ -2383,10 +3769,10 @@ export default function Result() {
                           ref={(el) => {
                             transcriptRefs.current[index] = el;
                           }}
-                          className={`cursor-pointer rounded-sm px-3 py-2 transition-all ${
+                          className={`rounded-md px-3 py-2 transition-all ${
                             currentTranscriptIndex === index
-                              ? "bg-yellow-200 font-medium text-gray-900"
-                              : "bg-white hover:bg-blue-50"
+                              ? "bg-blue-50 font-medium text-gray-900"
+                              : "text-gray-600"
                           }`}
                           title={item.timestamp}
                         >
@@ -2404,7 +3790,7 @@ export default function Result() {
                 {/* Chat Tab */}
                 {activeTab === "chat" && (
                   <div className="flex h-full flex-col">
-                    <div className="flex-1 space-y-3 overflow-y-auto p-4">
+                    <div className="flex-1 space-y-3 overflow-y-auto p-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 hover:[&::-webkit-scrollbar-thumb]:bg-gray-400 [&::-webkit-scrollbar-track]:bg-transparent">
                       {chatMessages.map((msg, index) => (
                         <div
                           key={index}
@@ -2583,7 +3969,7 @@ export default function Result() {
                       <div className="border-b border-gray-200 bg-yellow-50 p-4">
                         <div className="mb-2">
                           <p className="mb-1 text-[10px] font-medium text-gray-500 uppercase">
-                            添加笔记到：
+                            Add note to:
                           </p>
                           <p className="line-clamp-2 text-xs text-gray-600 italic">
                             "{editingNote.content}"
@@ -2601,14 +3987,14 @@ export default function Result() {
                             onClick={handleCancelNote}
                             className="rounded px-3 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-100"
                           >
-                            取消
+                            Cancel
                           </button>
                           <button
                             onClick={handleSaveNote}
                             disabled={!noteInputText.trim()}
                             className="rounded bg-yellow-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-yellow-600 disabled:cursor-not-allowed disabled:bg-gray-300"
                           >
-                            保存笔记
+                            Save note
                           </button>
                         </div>
                       </div>
@@ -2631,8 +4017,10 @@ export default function Result() {
                               d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
                             />
                           </svg>
-                          <p className="text-sm font-medium text-gray-600">暂无笔记</p>
-                          <p className="mt-1 text-xs text-gray-400">双击左侧内容可添加笔记</p>
+                          <p className="text-sm font-medium text-gray-600">No notes</p>
+                          <p className="mt-1 text-xs text-gray-400">
+                            Double-click on the left content to add notes
+                          </p>
                         </div>
                       ) : (
                         <div className="space-y-3">
@@ -2659,13 +4047,14 @@ export default function Result() {
                                 <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                                   <button
                                     onClick={() => {
-                                      // Find the original content
-                                      const section = videoData?.sections?.find(
-                                        (s) => s.id === note.sectionId,
+                                      // Find the original content (V2.0: use main_body)
+                                      const sectionIndex = parseInt(
+                                        note.sectionId.replace("section-", ""),
+                                        10,
                                       );
+                                      const section = videoData?.main_body?.[sectionIndex];
                                       const content =
-                                        section?.content?.[note.sentenceIndex]?.content ||
-                                        note.contentPreview;
+                                        section?.content_markdown || note.contentPreview;
                                       setEditingNote({
                                         sectionId: note.sectionId,
                                         sentenceIndex: note.sentenceIndex,
@@ -2720,7 +4109,7 @@ export default function Result() {
                 )}
               </div>
 
-              {/* Comments Panel - Feishu style */}
+              {/* Comments Panel - Disabled
               <div className="flex max-h-[400px] flex-col border-t border-gray-200">
                 <div className="border-b border-gray-100 px-4 py-3">
                   <button
@@ -2781,20 +4170,6 @@ export default function Result() {
                       </div>
                     ) : (
                       <>
-                        {/* Selected sentence preview */}
-                        {/* <div className="border-b border-gray-100 bg-amber-50 px-4 py-2 flex-shrink-0">
-                        <p className="line-clamp-2 text-xs text-amber-800">
-                          "{selectedSentence.content}"
-                        </p>
-                        <button
-                          onClick={() => setSelectedSentence(null)}
-                          className="mt-1 text-[10px] text-amber-600 hover:text-amber-700"
-                        >
-                          取消选择
-                        </button> */}
-                        {/* </div> */}
-
-                        {/* Comments list */}
                         <div className="min-h-0 flex-1 overflow-y-auto">
                           {sidebarCommentsLoading ? (
                             <div className="flex items-center justify-center py-6">
@@ -2842,7 +4217,6 @@ export default function Result() {
                           )}
                         </div>
 
-                        {/* Add comment form */}
                         <form
                           onSubmit={handleSubmitSidebarComment}
                           className="border-t border-gray-100 p-3"
@@ -2893,6 +4267,7 @@ export default function Result() {
                   </div>
                 )}
               </div>
+              */}
             </div>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { Link } from "react-router";
 import { useAuth } from "@/contexts/AuthContext";
 
 export function UserMenu() {
@@ -221,6 +222,53 @@ export function UserMenu() {
 
           {/* Menu Items */}
           <div className="py-1">
+            <Link
+              to="/favorites"
+              onClick={() => setIsOpen(false)}
+              className="flex w-full items-center gap-3 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+            >
+              <svg
+                className="h-5 w-5 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+                />
+              </svg>
+              My Favorites
+            </Link>
+            <button
+              onClick={async () => {
+                setIsOpen(false);
+                try {
+                  await signOut();
+                  await signInWithGoogle({ queryParams: { prompt: "select_account" } });
+                } catch (error) {
+                  console.error("Switch account failed:", error);
+                }
+              }}
+              className="flex w-full items-center gap-3 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+            >
+              <svg
+                className="h-5 w-5 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+                />
+              </svg>
+              Switch Account
+            </button>
             <button
               onClick={handleSignOut}
               className="flex w-full items-center gap-3 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"

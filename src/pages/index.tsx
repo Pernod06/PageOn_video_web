@@ -1,33 +1,25 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import { Button, Card, Input, UserMenu } from "@/components";
+import { Button, Input, UserMenu } from "@/components";
+import { VideoSeekExamples, type VideoSeekExamplesHandle } from "@/components/VideoSeekExamples";
 import PageonLogo from "@/assets/pageon-logo.svg";
 import { searchYouTubeDataAPI, type YouTubeSearchResult } from "@/services/api";
+import { toggleVideoLike, checkUserLiked, getVideoLikeCount } from "@/services/likeService";
 import { useAuth } from "@/contexts/AuthContext";
+import { Flame, Download, Sparkles, Heart } from "lucide-react";
 
-// 预设的示例演示 - 使用本地缓存数据
-const EXAMPLE_PRESENTATIONS = [
-  {
-    videoId: "DxL2HoqLbyA",
-    title: "The Most Misunderstood Concept in Physics",
-    thumbnail: "https://img.youtube.com/vi/DxL2HoqLbyA/maxresdefault.jpg",
-    duration: "14:30",
-    isExample: true,
-  },
-  {
-    videoId: "EWFFaKxsz_s",
-    title: "How to Learn AI in 17 Minutes",
-    thumbnail: "https://img.youtube.com/vi/EWFFaKxsz_s/maxresdefault.jpg",
-    duration: "17:00",
-    isExample: true,
-  },
-  {
-    videoId: "hKQtjY2koyk",
-    title: "外蒙古為何獨立？新疆、西藏為何不行？",
-    thumbnail: "https://img.youtube.com/vi/hKQtjY2koyk/maxresdefault.jpg",
-    duration: "26:15",
-    isExample: true,
-  },
+// 推荐视频的搜索关键词（随机选择）
+const TRENDING_QUERIES = [
+  "TED talk",
+  "documentary",
+  "science explained",
+  "history documentary",
+  "technology trends",
+  "educational video",
+  "interview",
+  "podcast",
+  "celebrity interview",
+  "podcast highlights",
 ];
 
 /**
@@ -80,22 +72,101 @@ const Home = () => {
   });
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [searchResults, setSearchResults] = useState<YouTubeSearchResult[]>([]);
-  const [hasSearched, setHasSearched] = useState(false);
+  // 搜索结果也从 sessionStorage 恢复
+  const [searchResults, setSearchResults] = useState<YouTubeSearchResult[]>(() => {
+    try {
+      const cached = sessionStorage.getItem("searchResults");
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    } catch (e) {
+      console.error("[Search] Failed to parse cached results:", e);
+    }
+    return [];
+  });
+  const [hasSearched, setHasSearched] = useState(() => {
+    return sessionStorage.getItem("hasSearched") === "true";
+  });
   const [showLoginPrompt, setShowLoginPrompt] = useState(false);
   const [pendingVideoUrl, setPendingVideoUrl] = useState<string | null>(null);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { user, signInWithGoogle, signInWithGitHub } = useAuth();
 
-  // 搜索的参数
-  const [searchOptions, setSearchOptions] = useState({
-    duration: "long" as "any" | "short" | "medium" | "long",
-    order: "viewCount" as "relevance" | "date" | "viewCount" | "rating",
-    time_filter: "" as "" | "hour" | "today" | "week" | "month" | "year",
-    limit: 10,
+  // VideoSeekExamples 的 ref，用于调用刷新方法
+  const videoSeekExamplesRef = useRef<VideoSeekExamplesHandle>(null);
+
+  // 点赞状态管理
+  const [likeCounts, setLikeCounts] = useState<Map<string, number>>(new Map());
+  const [likedVideos, setLikedVideos] = useState<Set<string>>(new Set());
+  const [likingVideoId, setLikingVideoId] = useState<string | null>(null);
+
+  // 推荐视频状态 - 从 sessionStorage 恢复以避免页面返回时重新获取
+  const [recommendedVideos, setRecommendedVideos] = useState<YouTubeSearchResult[]>(() => {
+    try {
+      const cached = sessionStorage.getItem("recommendedVideos");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        console.log("[Recommended] Restored", parsed.length, "videos from cache");
+        return parsed;
+      }
+    } catch (e) {
+      console.error("[Recommended] Failed to parse cached videos:", e);
+    }
+    return [];
   });
-  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+  const [isLoadingRecommended, setIsLoadingRecommended] = useState(() => {
+    // 如果有缓存数据，初始就不是 loading 状态
+    return !sessionStorage.getItem("recommendedVideos");
+  });
+
+  // 获取推荐视频的函数
+  const fetchRecommendedVideos = async () => {
+    setIsLoadingRecommended(true);
+    try {
+      // 随机选择一个搜索关键词
+      const randomQuery = TRENDING_QUERIES[Math.floor(Math.random() * TRENDING_QUERIES.length)];
+      console.log("[Recommended] Fetching trending videos with query:", randomQuery);
+
+      const response = await searchYouTubeDataAPI(randomQuery, {
+        limit: 12, // 获取更多结果以确保有足够的视频
+        order: "viewCount",
+        duration: "any", // 不限时长，获取更多结果
+      });
+
+      if (response.success && response.results.length > 0) {
+        console.log("[Recommended] Found", response.results.length, "trending videos");
+        const videos = response.results.slice(0, 6);
+        setRecommendedVideos(videos);
+        // 缓存到 sessionStorage
+        sessionStorage.setItem("recommendedVideos", JSON.stringify(videos));
+      }
+    } catch (err) {
+      console.error("[Recommended] Failed to fetch trending videos:", err);
+    } finally {
+      setIsLoadingRecommended(false);
+    }
+  };
+
+  // 刷新推荐视频
+  const handleRefreshRecommended = () => {
+    sessionStorage.removeItem("recommendedVideos"); // 清除缓存
+    setRecommendedVideos([]);
+    fetchRecommendedVideos();
+  };
+
+  // 获取推荐视频 - 只在首次加载且没有缓存时获取
+  useEffect(() => {
+    // 如果已经有推荐视频（从缓存恢复或已获取），跳过
+    if (recommendedVideos.length > 0) {
+      console.log("[Recommended] Already have", recommendedVideos.length, "videos, skipping fetch");
+      setIsLoadingRecommended(false);
+      return;
+    }
+
+    fetchRecommendedVideos();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 只在组件挂载时执行一次
 
   // Get video URL from extension notification or direct link
   const videoParam = searchParams.get("video");
@@ -172,23 +243,27 @@ const Home = () => {
 
       try {
         const response = await searchYouTubeDataAPI(value, {
-          limit: searchOptions.limit,
-          order: searchOptions.order,
-          duration: searchOptions.duration,
-          time_filter: searchOptions.time_filter || undefined,
+          limit: 10,
+          order: "viewCount",
+          duration: "any",
+          time_filter: undefined,
         });
 
         if (response.success && response.results.length > 0) {
           console.log("[Search] Found", response.results.length, "videos");
           setSearchResults(response.results);
+          sessionStorage.setItem("searchResults", JSON.stringify(response.results));
+          sessionStorage.setItem("hasSearched", "true");
         } else {
           setError(response.error || "No videos found. Try different keywords.");
           setSearchResults([]);
+          sessionStorage.removeItem("searchResults");
         }
       } catch (err) {
         console.error("[Search] Error:", err);
         setError("Search failed. Please try again.");
         setSearchResults([]);
+        sessionStorage.removeItem("searchResults");
       } finally {
         setIsLoading(false);
       }
@@ -202,16 +277,11 @@ const Home = () => {
     navigateToAnalysis(videoUrl);
   };
 
-  // 选择示例视频（无需登录）
-  const handleSelectExample = (example: (typeof EXAMPLE_PRESENTATIONS)[0]) => {
-    // 示例视频无需登录，直接跳转
-    navigate("/result", {
-      state: {
-        videoId: example.videoId,
-        title: example.title,
-        isExample: true,
-      },
-    });
+  // 选择推荐视频（需要登录，走正常分析流程）
+  const handleSelectRecommended = (video: YouTubeSearchResult) => {
+    const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
+    console.log("[Select Recommended] User selected recommended video:", video.title);
+    navigateToAnalysis(videoUrl);
   };
 
   // 登录后继续分析
@@ -228,6 +298,90 @@ const Home = () => {
       setPendingVideoUrl(null);
     }
   }, [user, pendingVideoUrl, navigate]);
+
+  // 加载视频的点赞数据（并行请求，更快）
+  const loadLikeData = async (videoIds: string[]) => {
+    // 过滤出尚未加载的视频
+    const newVideoIds = videoIds.filter((id) => !likeCounts.has(id));
+    if (newVideoIds.length === 0) return;
+
+    try {
+      // 并行获取所有视频的点赞数
+      const countPromises = newVideoIds.map(async (videoId) => {
+        const count = await getVideoLikeCount(videoId);
+        return { videoId, count };
+      });
+
+      const countResults = await Promise.all(countPromises);
+
+      // 更新点赞数
+      const newLikeCounts = new Map(likeCounts);
+      countResults.forEach(({ videoId, count }) => {
+        newLikeCounts.set(videoId, count);
+      });
+      setLikeCounts(newLikeCounts);
+
+      // 如果用户已登录，检查点赞状态（从 localStorage）
+      if (user?.id) {
+        const newLikedVideos = new Set(likedVideos);
+        for (const videoId of newVideoIds) {
+          const isLiked = await checkUserLiked(videoId, user.id);
+          if (isLiked) {
+            newLikedVideos.add(videoId);
+          }
+        }
+        setLikedVideos(newLikedVideos);
+      }
+    } catch (err) {
+      console.error("[Like] Failed to load like data:", err);
+    }
+  };
+
+  // 当搜索结果或推荐视频变化时，加载点赞数据
+  useEffect(() => {
+    const videoIds = [
+      ...searchResults.map((v) => v.videoId),
+      ...recommendedVideos.map((v) => v.videoId),
+    ].filter(Boolean);
+
+    if (videoIds.length > 0) {
+      loadLikeData(videoIds);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchResults, recommendedVideos, user?.id]);
+
+  // 处理点赞
+  const handleLike = async (e: React.MouseEvent, videoId: string) => {
+    e.stopPropagation(); // 阻止触发视频选择
+
+    if (!user) {
+      // 未登录，提示登录
+      setPendingVideoUrl(null);
+      setShowLoginPrompt(true);
+      return;
+    }
+
+    setLikingVideoId(videoId);
+    try {
+      const result = await toggleVideoLike(videoId, user.id);
+
+      // 更新状态
+      setLikeCounts((prev) => new Map(prev).set(videoId, result.likeCount));
+      setLikedVideos((prev) => {
+        const newSet = new Set(prev);
+        if (result.liked) {
+          newSet.add(videoId);
+        } else {
+          newSet.delete(videoId);
+        }
+        return newSet;
+      });
+    } catch (err) {
+      console.error("[Like] Error:", err);
+    } finally {
+      setLikingVideoId(null);
+    }
+  };
 
   // 回车触发提交
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -268,30 +422,65 @@ const Home = () => {
   );
 
   return (
-    <div className="flex min-h-screen flex-col items-center bg-gradient-to-b from-slate-50 to-white p-6">
+    <div
+      className="relative flex min-h-screen flex-col items-center bg-[#faf9f5] p-6"
+      style={{ position: "relative" }}
+    >
       {/* Top Navigation Bar */}
-      <div className="fixed top-0 right-0 left-0 z-40 flex items-center justify-between bg-white/80 px-6 py-3 backdrop-blur-sm">
+      <div className="max-w-8xl mb-8 flex w-full items-center justify-between">
         <div className="flex items-center gap-2">
           <img src={PageonLogo} alt="PageOn Logo" className="h-8 w-auto" />
         </div>
         <UserMenu />
       </div>
 
-      <div className="w-full max-w-4xl space-y-8 pt-20">
+      {/* 插件提示 - 绝对定位，固定在页面上，随页面滚动 */}
+      <div className="absolute top-50 left-24 z-10 hidden w-64 space-y-3 lg:block">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-blue-100 p-2">
+            <Sparkles className="h-5 w-5 text-blue-600" />
+          </div>
+          <div className="flex-1">
+            <h4 className="mb-1 text-sm font-semibold text-gray-900">
+              Browser Extension for Better Experience
+            </h4>
+            <p className="text-xs leading-relaxed text-gray-600">
+              We've integrated the extension! Download it now to experience seamless video analysis.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => {
+            // 创建下载链接
+            const link = document.createElement("a");
+            link.href = "/extension.zip"; // 假设 extension.zip 在 public 目录
+            link.download = "PageOn-Extension.zip";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }}
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-200 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-blue-700 hover:shadow-md active:scale-95"
+        >
+          <Download className="h-4 w-4" />
+          Download Extension
+        </button>
+        <p className="text-center text-xs text-gray-500">Version 2.0.1</p>
+      </div>
+
+      <div className="w-full max-w-4xl space-y-8">
         {/* Logo and Title */}
-        <div className="space-y-4 text-center">
+        {/* <div className="space-y-4 text-center">
           <div className="flex justify-center">
             <img src={PageonLogo} alt="PageOn Logo" className="h-14 w-auto" />
           </div>
           <h1 className="text-3xl font-bold text-gray-900 md:text-4xl">Video Analysis</h1>
-          <p className="text-lg text-gray-500">Paste a YouTube URL or search for videos</p>
-        </div>
+        </div> */}
 
         {/* Main Input Card */}
-        <Card className="border-2 border-gray-200 shadow-lg transition-all duration-200 hover:border-blue-400 hover:shadow-xl">
-          <div className="space-y-5 p-8">
+        <div className="mx-auto w-full max-w-xl">
+          <div className="space-y-3 p-5">
             {/* Title */}
-            <div className="flex flex-wrap items-center gap-2 font-serif text-2xl tracking-tight text-gray-800 md:text-3xl">
+            <div className="flex flex-nowrap items-center justify-center gap-1.5 font-serif text-base tracking-tight text-gray-800 md:text-xl">
               <span>What do you want to</span>
               <span className="font-semibold text-blue-600 italic">Read</span>
               <span>from YouTube today?</span>
@@ -328,6 +517,8 @@ const Home = () => {
                       handleInputChange("");
                       setSearchResults([]);
                       setHasSearched(false);
+                      sessionStorage.removeItem("searchResults");
+                      sessionStorage.removeItem("hasSearched");
                     }}
                     className="absolute top-1/2 right-4 -translate-y-1/2 text-gray-400 transition-colors hover:text-gray-600"
                     aria-label="Clear"
@@ -377,141 +568,6 @@ const Home = () => {
               </Button>
             </div>
 
-            {/* 高级搜索选项 */}
-            <div className="space-y-3">
-              <button
-                type="button"
-                onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
-                className="flex items-center gap-2 text-sm text-gray-500 transition-colors hover:text-blue-600"
-              >
-                <svg
-                  className={`h-4 w-4 transition-transform ${showAdvancedOptions ? "rotate-180" : ""}`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M19 9l-7 7-7-7"
-                  />
-                </svg>
-                Advanced Search Options
-              </button>
-
-              {showAdvancedOptions && (
-                <div className="grid grid-cols-2 gap-4 rounded-lg bg-gray-50 p-4 md:grid-cols-4">
-                  {/* Duration */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Duration</label>
-                    <select
-                      value={searchOptions.duration}
-                      onChange={(e) =>
-                        setSearchOptions((prev) => ({
-                          ...prev,
-                          duration: e.target.value as typeof prev.duration,
-                        }))
-                      }
-                      className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                    >
-                      <option value="any">Any</option>
-                      <option value="short">&lt; 20 min</option>
-                      <option value="medium">20 min - 1 hour</option>
-                      <option value="long">&gt; 1 hour</option>
-                    </select>
-                  </div>
-
-                  {/* Order */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Sort by</label>
-                    <select
-                      value={searchOptions.order}
-                      onChange={(e) =>
-                        setSearchOptions((prev) => ({
-                          ...prev,
-                          order: e.target.value as typeof prev.order,
-                        }))
-                      }
-                      className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                    >
-                      <option value="relevance">Relevance</option>
-                      <option value="date">Upload Date</option>
-                      <option value="viewCount">View Count</option>
-                      <option value="rating">Rating</option>
-                    </select>
-                  </div>
-
-                  {/* Time Filter */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Upload Date</label>
-                    <select
-                      value={searchOptions.time_filter}
-                      onChange={(e) =>
-                        setSearchOptions((prev) => ({
-                          ...prev,
-                          time_filter: e.target.value as typeof prev.time_filter,
-                        }))
-                      }
-                      className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                    >
-                      <option value="">Any time</option>
-                      <option value="hour">Last hour</option>
-                      <option value="today">Today</option>
-                      <option value="week">This week</option>
-                      <option value="month">This month</option>
-                      <option value="year">This year</option>
-                    </select>
-                  </div>
-
-                  {/* Limit */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Results</label>
-                    <select
-                      value={searchOptions.limit}
-                      onChange={(e) =>
-                        setSearchOptions((prev) => ({ ...prev, limit: parseInt(e.target.value) }))
-                      }
-                      className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                    >
-                      <option value={5}>5</option>
-                      <option value={10}>10</option>
-                      <option value={20}>20</option>
-                      <option value={50}>50</option>
-                    </select>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Smart tip - changes based on input type */}
-            <p className="text-xs text-gray-400">
-              {isUrl ? (
-                <>🎬 YouTube URL detected - click Analyze to start</>
-              ) : input.trim() ? (
-                <>
-                  🔍 Searching{" "}
-                  {searchOptions.duration === "long"
-                    ? ">1 hour"
-                    : searchOptions.duration === "medium"
-                      ? "20 min - 1 hour"
-                      : searchOptions.duration === "short"
-                        ? "<20 min"
-                        : ""}{" "}
-                  videos, sorted by{" "}
-                  {searchOptions.order === "viewCount"
-                    ? "popularity"
-                    : searchOptions.order === "date"
-                      ? "upload date"
-                      : searchOptions.order === "rating"
-                        ? "rating"
-                        : "relevance"}
-                </>
-              ) : (
-                <>💡 Paste a YouTube URL to analyze, or type keywords to search</>
-              )}
-            </p>
-
             {error && (
               <div className="flex items-center gap-2 rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">
                 <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
@@ -525,7 +581,7 @@ const Home = () => {
               </div>
             )}
           </div>
-        </Card>
+        </div>
 
         {/* Search Results */}
         {hasSearched && (
@@ -537,7 +593,27 @@ const Home = () => {
                   : "No results found"}
               </h3>
               {searchResults.length > 0 && (
-                <span className="text-sm text-gray-500">Click to analyze</span>
+                <button
+                  onClick={handleRefreshRecommended}
+                  disabled={isLoadingRecommended}
+                  className="flex items-center gap-1.5 text-sm text-gray-500 transition-colors hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Refresh recommended videos"
+                >
+                  <svg
+                    className={`h-4 w-4 ${isLoadingRecommended ? "animate-spin" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                    />
+                  </svg>
+                  Refresh
+                </button>
               )}
             </div>
 
@@ -593,10 +669,30 @@ const Home = () => {
                           <p className="mt-1 text-xs text-gray-500">{video.channel}</p>
                         )}
                       </div>
-                      <div className="flex items-center gap-2 text-xs text-gray-400">
-                        {video.views && <span>{formatViews(video.views)}</span>}
-                        {video.views && video.publishedDate && <span>•</span>}
-                        {video.publishedDate && <span>{video.publishedDate}</span>}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs text-gray-400">
+                          {video.views && <span>{formatViews(video.views)}</span>}
+                          {video.views && video.publishedDate && <span>•</span>}
+                          {video.publishedDate && <span>{video.publishedDate}</span>}
+                        </div>
+                        {/* Like Button */}
+                        <button
+                          onClick={(e) => handleLike(e, video.videoId)}
+                          disabled={likingVideoId === video.videoId}
+                          className={`flex items-center gap-1 rounded-full px-2 py-1 text-xs transition-all ${
+                            likedVideos.has(video.videoId)
+                              ? "bg-red-50 text-red-500"
+                              : "text-gray-400 hover:bg-gray-100 hover:text-red-500"
+                          } disabled:opacity-50`}
+                          title={likedVideos.has(video.videoId) ? "Unlike" : "Like"}
+                        >
+                          <Heart
+                            className={`h-3.5 w-3.5 ${likedVideos.has(video.videoId) ? "fill-current" : ""}`}
+                          />
+                          {(likeCounts.get(video.videoId) || 0) > 0 && (
+                            <span>{likeCounts.get(video.videoId)}</span>
+                          )}
+                        </button>
                       </div>
                     </div>
                   </button>
@@ -606,95 +702,139 @@ const Home = () => {
           </div>
         )}
 
-        {/* Example Presentations - Show when no search results */}
+        {/* Recommended Videos - Show when no search results */}
         {!hasSearched && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-gray-700">Example Presentations</h3>
-              <span className="text-xs text-gray-400">Click to view demo</span>
+              <h3 className="flex items-center gap-1.5 text-sm font-medium text-gray-700">
+                <Flame className="h-4 w-4" />
+                Trending Videos
+              </h3>
+              <button
+                onClick={handleRefreshRecommended}
+                disabled={isLoadingRecommended}
+                className="flex items-center gap-1.5 text-xs text-gray-400 transition-colors hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Refresh recommended videos"
+              >
+                <svg
+                  className={`h-3.5 w-3.5 ${isLoadingRecommended ? "animate-spin" : ""}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+                Refresh
+              </button>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              {EXAMPLE_PRESENTATIONS.map((example) => (
-                <button
-                  key={example.videoId}
-                  onClick={() => handleSelectExample(example)}
-                  className="group overflow-hidden rounded-xl border border-gray-200 bg-white text-left transition-all duration-200 hover:border-blue-400 hover:shadow-lg"
-                >
-                  {/* Thumbnail */}
-                  <div className="relative aspect-video bg-gray-100">
-                    <img
-                      src={example.thumbnail}
-                      alt={example.title}
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                    />
-                    {/* Duration Badge */}
-                    <div className="absolute right-2 bottom-2 rounded bg-black/80 px-2 py-0.5 text-xs font-medium text-white">
-                      {example.duration}
+            {/* Loading Skeleton */}
+            {isLoadingRecommended ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div
+                    key={i}
+                    className="overflow-hidden rounded-xl border border-gray-200 bg-white"
+                  >
+                    <div className="aspect-video animate-pulse bg-gray-200" />
+                    <div className="space-y-2 p-3">
+                      <div className="h-4 w-3/4 animate-pulse rounded bg-gray-200" />
+                      <div className="h-3 w-1/2 animate-pulse rounded bg-gray-200" />
                     </div>
-                    {/* Play Overlay */}
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/30">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/90 opacity-0 shadow-lg transition-all group-hover:opacity-100">
-                        <svg
-                          className="h-5 w-5 text-gray-900"
-                          fill="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
+                  </div>
+                ))}
+              </div>
+            ) : recommendedVideos.length > 0 ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                {recommendedVideos.map((video) => (
+                  <button
+                    key={video.videoId}
+                    onClick={() => handleSelectRecommended(video)}
+                    className="group overflow-hidden rounded-xl border border-gray-200 bg-white text-left transition-all duration-200 hover:border-blue-400 hover:shadow-lg"
+                  >
+                    {/* Thumbnail */}
+                    <div className="relative aspect-video bg-gray-100">
+                      <img
+                        src={
+                          video.thumbnail ||
+                          `https://img.youtube.com/vi/${video.videoId}/maxresdefault.jpg`
+                        }
+                        alt={video.title}
+                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).src =
+                            `https://img.youtube.com/vi/${video.videoId}/mqdefault.jpg`;
+                        }}
+                      />
+                      {/* Duration Badge */}
+                      {video.length && (
+                        <div className="absolute right-2 bottom-2 rounded bg-black/80 px-2 py-0.5 text-xs font-medium text-white">
+                          {video.length}
+                        </div>
+                      )}
+                      {/* Play Overlay */}
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/30">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/90 opacity-0 shadow-lg transition-all group-hover:opacity-100">
+                          <svg
+                            className="h-5 w-5 text-gray-900"
+                            fill="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  {/* Info */}
-                  <div className="p-3">
-                    <h4 className="mb-1 line-clamp-2 text-sm font-medium text-gray-900 group-hover:text-blue-600">
-                      {example.title}
-                    </h4>
-                    <p className="text-xs text-gray-500">Click to view presentation</p>
-                  </div>
-                </button>
-              ))}
-            </div>
+                    {/* Info */}
+                    <div className="p-3">
+                      <h4 className="mb-1 line-clamp-2 text-sm font-medium text-gray-900 group-hover:text-blue-600">
+                        {video.title}
+                      </h4>
+                      <div className="flex items-center gap-2 text-xs text-gray-500">
+                        {video.channel && (
+                          <span className="max-w-[100px] truncate">{video.channel}</span>
+                        )}
+                        {video.channel && video.views && <span>•</span>}
+                        {video.views && <span>{formatViews(video.views)}</span>}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="py-8 text-center text-sm text-gray-500">
+                No trending videos available. Try searching for a topic!
+              </div>
+            )}
           </div>
         )}
 
-        {/* Quick Examples */}
-        <div className="space-y-3">
-          <p className="text-xs font-medium tracking-wide text-gray-500 uppercase">
-            Try these examples
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {/* Example URLs */}
+        {/* Latest Video */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-gray-700">📺 Discover Videos</h3>
             <button
-              onClick={() => handleInputChange("Physics Video")}
-              disabled={isLoading}
-              className="rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => videoSeekExamplesRef.current?.refresh()}
+              className="flex items-center gap-1.5 text-xs text-gray-400 transition-colors hover:text-blue-600"
+              title="Refresh examples"
             >
-              📹 Physics Video
-            </button>
-            <button
-              onClick={() => handleInputChange("AI Tutorial")}
-              disabled={isLoading}
-              className="rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              📹 AI Tutorial
-            </button>
-            {/* Example Searches */}
-            <button
-              onClick={() => handleInputChange("machine learning tutorial")}
-              disabled={isLoading}
-              className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              🔍 machine learning
-            </button>
-            <button
-              onClick={() => handleInputChange("history documentary")}
-              disabled={isLoading}
-              className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              🔍 history documentary
+              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
+              </svg>
+              Refresh
             </button>
           </div>
+          <VideoSeekExamples ref={videoSeekExamplesRef} />
         </div>
       </div>
 
@@ -790,6 +930,16 @@ const Home = () => {
                     <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
                   </svg>
                   <span>Continue with GitHub</span>
+                </button>
+              </div>
+
+              {/* Switch Account */}
+              <div className="flex justify-center">
+                <button
+                  onClick={() => signInWithGoogle({ queryParams: { prompt: "select_account" } })}
+                  className="text-xs text-gray-400 transition-colors hover:text-gray-600 hover:underline"
+                >
+                  Switch Account
                 </button>
               </div>
 

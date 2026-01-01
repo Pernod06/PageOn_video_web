@@ -1,0 +1,191 @@
+/* PageOn - YouTube Thumbnail Overlay Styles */
+
+/* 缩略图容器需要相对定位以便按钮绝对定位 */
+ytd-thumbnail,
+ytd-playlist-thumbnail {
+  position: relative !important;
+}
+
+/* 确保所有包含缩略图的容器也支持相对定位 */
+ytd-rich-item-renderer,
+ytd-video-renderer,
+ytd-grid-video-renderer,
+ytd-compact-video-renderer,
+ytd-playlist-video-renderer {
+  position: relative;
+}
+
+/* 分析按钮样式 - 带 PageOn 字样 */
+.pageon-thumbnail-btn {
+  position: absolute !important;
+  top: 8px !important;
+  right: 8px !important;
+  z-index: 9999 !important;
+  
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  
+  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%) !important;
+  color: white !important;
+  height: 24px !important;
+  padding: 0 8px !important;
+  margin: 0 !important;
+  border-radius: 12px !important;
+  border: none !important;
+  cursor: pointer !important;
+  
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+  transition: all 0.2s ease !important;
+  
+  /* 确保可点击 */
+  pointer-events: auto !important;
+  
+  /* 始终可见 */
+  opacity: 0.95 !important;
+  
+  /* 防止被 YouTube 样式覆盖 */
+  visibility: visible !important;
+}
+
+/* 按钮图标 */
+.pageon-thumbnail-btn svg {
+  width: 12px !important;
+  height: 12px !important;
+  flex-shrink: 0 !important;
+}
+
+/* 按钮文字 */
+.pageon-thumbnail-btn .pageon-btn-text {
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.3px !important;
+  white-space: nowrap !important;
+}
+
+/* 按钮悬停效果 */
+.pageon-thumbnail-btn:hover {
+  background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%) !important;
+  transform: scale(1.05) !important;
+  opacity: 1 !important;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.6) !important;
+}
+
+/* 按钮点击效果 */
+.pageon-thumbnail-btn:active {
+  transform: scale(0.95) !important;
+}
+
+/* ===== 针对不同页面的适配 ===== */
+
+/* 首页大缩略图 */
+ytd-rich-grid-media ytd-thumbnail .pageon-thumbnail-btn,
+ytd-rich-item-renderer .pageon-thumbnail-btn {
+  height: 26px !important;
+  padding: 0 10px !important;
+  top: 10px !important;
+  right: 10px !important;
+}
+
+ytd-rich-grid-media ytd-thumbnail .pageon-thumbnail-btn svg,
+ytd-rich-item-renderer .pageon-thumbnail-btn svg {
+  width: 14px !important;
+  height: 14px !important;
+}
+
+ytd-rich-grid-media ytd-thumbnail .pageon-thumbnail-btn .pageon-btn-text,
+ytd-rich-item-renderer .pageon-thumbnail-btn .pageon-btn-text {
+  font-size: 11px !important;
+}
+
+/* 侧边栏推荐视频（较小的缩略图）- 只显示图标 */
+ytd-compact-video-renderer ytd-thumbnail .pageon-thumbnail-btn,
+ytd-playlist-video-renderer ytd-thumbnail .pageon-thumbnail-btn {
+  height: 22px !important;
+  width: 22px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  top: 4px !important;
+  right: 4px !important;
+}
+
+ytd-compact-video-renderer ytd-thumbnail .pageon-thumbnail-btn .pageon-btn-text,
+ytd-playlist-video-renderer ytd-thumbnail .pageon-thumbnail-btn .pageon-btn-text {
+  display: none !important;
+}
+
+ytd-compact-video-renderer ytd-thumbnail .pageon-thumbnail-btn svg,
+ytd-playlist-video-renderer ytd-thumbnail .pageon-thumbnail-btn svg {
+  width: 12px !important;
+  height: 12px !important;
+}
+
+/* 搜索结果页 */
+ytd-video-renderer ytd-thumbnail .pageon-thumbnail-btn {
+  height: 24px !important;
+}
+
+/* Shorts 缩略图 - 只显示图标 */
+ytd-reel-item-renderer ytd-thumbnail .pageon-thumbnail-btn {
+  height: 22px !important;
+  width: 22px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  top: 6px !important;
+  right: 6px !important;
+}
+
+ytd-reel-item-renderer ytd-thumbnail .pageon-thumbnail-btn .pageon-btn-text {
+  display: none !important;
+}
+
+/* 确保按钮在 YouTube 的 overlay 之上 */
+ytd-thumbnail-overlay-toggle-button-renderer,
+ytd-thumbnail-overlay-time-status-renderer {
+  z-index: 1000;
+}
+
+.pageon-thumbnail-btn {
+  z-index: 9999 !important;
+}
+
+/* 移动端适配 - 只显示图标 */
+@media (max-width: 768px) {
+  .pageon-thumbnail-btn {
+    height: 22px !important;
+    width: 22px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    top: 6px !important;
+    right: 6px !important;
+  }
+  
+  .pageon-thumbnail-btn .pageon-btn-text {
+    display: none !important;
+  }
+  
+  .pageon-thumbnail-btn svg {
+    width: 12px !important;
+    height: 12px !important;
+  }
+}
+
+/* 防止 YouTube 样式覆盖 */
+.pageon-thumbnail-btn {
+  box-sizing: border-box !important;
+  margin: 0 !important;
+  outline: none !important;
+  text-decoration: none !important;
+  line-height: 1 !important;
+}
+
+/* 确保按钮在暗色模式下也可见 */
+html[dark] .pageon-thumbnail-btn {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6) !important;
+}
+
+html[dark] .pageon-thumbnail-btn:hover {
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.8) !important;
+}

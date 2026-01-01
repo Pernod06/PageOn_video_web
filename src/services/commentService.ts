@@ -6,7 +6,7 @@ export type { SentenceComment, NewSentenceComment } from "./supabase";
 
 // API配置 - 使用与 result.tsx 相同的后端
 // 开发环境使用相对路径（通过 vite 代理），生产环境使用完整 URL
-const API_BASE_URL = import.meta.env.DEV ? "" : "http://52.72.117.236:5500";
+const API_BASE_URL = import.meta.env.DEV ? "" : "http://52.72.117.236:5000";
 
 // Random avatar URLs for AI-generated comments
 const AI_AVATARS = [

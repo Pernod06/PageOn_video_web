@@ -6,7 +6,7 @@ interface AuthContextType {
   user: User | null;
   session: Session | null;
   loading: boolean;
-  signInWithGoogle: () => Promise<void>;
+  signInWithGoogle: (options?: { queryParams?: { [key: string]: string } }) => Promise<void>;
   signInWithGitHub: () => Promise<void>;
   signOut: () => Promise<void>;
   isConfigured: boolean;
@@ -94,7 +94,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return window.location.origin + window.location.pathname + window.location.search;
   };
 
-  const signInWithGoogle = async () => {
+  const signInWithGoogle = async (options?: { queryParams?: { [key: string]: string } }) => {
     if (!supabase) {
       console.error("[Auth] Supabase not configured");
       return;
@@ -104,6 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       provider: "google",
       options: {
         redirectTo: getCurrentUrl(),
+        queryParams: options?.queryParams,
       },
     });
 
