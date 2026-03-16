@@ -1,475 +1,148 @@
-# React + TypeScript + Nitro Full-Stack Starter
+# PageOn Video Web
 
-A production-ready full-stack starter template combining React 19 with TypeScript on the frontend and Nitro for the backend API. Built with Vite for blazing-fast development and optimized builds.
+`PageOn_video_web` 是 PageOn 视频分析产品的前端仓库。它负责搜索 YouTube 视频、发起分析请求、展示结构化文章、聊天、评论、收藏，以及打包浏览器扩展。
 
-⭐ **Don't forget to star this repo if you find it useful!**
+这个仓库不是独立运行的，开发和生产都默认依赖配套后端仓库 `../YouTube-process` 提供 `/api/*` 接口。
 
----
+## 仓库定位
 
-## Features
+- 前端框架：React 19 + TypeScript + Vite
+- UI：Tailwind CSS 4
+- 路由：`vite-plugin-pages`
+- 登录与互动数据：Supabase
+- 后端代理：开发环境通过 Vite 将 `/api` 代理到 `YouTube-process`
+- 扩展：同仓库内包含 Chrome Extension 代码和打包脚本
 
-### Frontend
+## 主要功能
 
-- ⚡ **React 19** with TypeScript and Vite
-- 🎨 **Tailwind CSS 4** + **shadcn/ui** components
-- 🗂️ **File-based routing** with `vite-plugin-pages`
-- 🔄 **Auto-imports** for React hooks and components
-- 🖼️ **SVG as React components** with `vite-plugin-svgr`
-- 🔤 **Google Fonts** integration
-- 📦 **Path aliases** (`@/components`, etc.)
+- 支持输入 YouTube 链接或关键词
+- 首页可直接调用后端搜索 YouTube 视频
+- 结果页支持流式分析，渲染结构化文章和章节导航
+- 支持聊天、评论、点赞、收藏、PDF 导出、关键结论图片
+- 支持多语言切换
+- 支持从浏览器扩展把当前 YouTube 视频带回 Web 应用分析
 
-### Backend
+## 目录概览
 
-- 🚀 **Nitro 3** server with H3 handler
-- 🛣️ **File-based API routing** in `/routes`
-- ⚡ **Fast development** with hot module replacement
-- 🔧 **TypeScript** support out of the box
-
-### Developer Experience
-
-- ✅ **ESLint** + **Prettier** configured
-- 🪝 **Husky** pre-commit hooks
-- 🐳 **Docker** setup included
-- 🤖 **Dependabot** for dependency updates
-- 📝 **Workspace settings** for team collaboration
-
----
-
-## Quick Start
-
-```bash
-# Install dependencies
-npm install
-
-# Start development server (frontend + backend)
-npm run dev
-
-# Build for production
-npm run build
-
-# Preview production build
-npm run preview
-
-# Lint code
-npm run lint
-```
-
-The dev server runs on:
-
-- **Frontend**: http://localhost:5000
-- **API**: http://localhost:5000/api/\*
-
----
-
-## Client-Side Routing (Frontend)
-
-### File-Based Routing with vite-plugin-pages
-
-Routes are automatically generated from files in `src/pages/`. Each `.tsx` file becomes a route.
-
-**Documentation**: [vite-plugin-pages](https://github.com/hannoeru/vite-plugin-pages)
-
-### Route Structure
-
-```
-src/pages/
-├── index.tsx           → /
-├── about.tsx           → /about
-├── users/
-│   ├── index.tsx       → /users
-│   ├── [id].tsx        → /users/:id (dynamic route)
-│   └── profile.tsx     → /users/profile
-└── [...all].tsx        → /* (catch-all/404)
-```
-
-### Creating Pages
-
-All page components must use **default exports**:
-
-```tsx
-// src/pages/about.tsx
-const About = () => {
-  return (
-    <div>
-      <h1>About Page</h1>
-    </div>
-  );
-};
-
-export default About;
-```
-
-### Dynamic Routes
-
-Use square brackets for dynamic segments:
-
-```tsx
-// src/pages/users/[id].tsx
-const UserDetail = () => {
-  const { id } = useParams(); // auto-imported from react-router
-
-  return (
-    <div>
-      <h1>User ID: {id}</h1>
-    </div>
-  );
-};
-
-export default UserDetail;
-```
-
-### Catch-All Routes
-
-Use `[...all].tsx` for 404 pages or catch-all routes:
-
-```tsx
-// src/pages/[...all].tsx or NotFound.tsx
-const NotFound = () => {
-  return (
-    <div>
-      <h1>404 - Page Not Found</h1>
-    </div>
-  );
-};
-
-export default NotFound;
-```
-
-### Navigation
-
-Use React Router hooks (auto-imported):
-
-```tsx
-const MyComponent = () => {
-  const navigate = useNavigate();
-  const location = useLocation();
-
-  return <button onClick={() => navigate("/about")}>Go to About</button>;
-};
-```
-
----
-
-## Server-Side Routing (Backend API)
-
-### File-Based API Routing with Nitro
-
-API routes are automatically generated from files in `routes/`. Powered by [Nitro](https://nitro.unjs.io/) and [H3](https://h3.unjs.io/).
-
-**Documentation**:
-
-- [Nitro Routing](https://nitro.unjs.io/guide/routing)
-- [H3 Handlers](https://h3.unjs.io/guide)
-
-### Route Structure
-
-```
-routes/
-├── api/
-│   ├── hello.ts        → GET/POST /api/hello
-│   ├── users/
-│   │   ├── index.ts    → GET/POST /api/users
-│   │   └── [id].ts     → GET/POST /api/users/:id
-│   └── auth/
-│       ├── login.ts    → POST /api/auth/login
-│       └── logout.ts   → POST /api/auth/logout
-└── health.ts           → GET /health
-```
-
-### Creating API Handlers
-
-Use `defineEventHandler` from H3:
-
-```typescript
-// routes/api/hello.ts
-export default defineEventHandler((event) => {
-  return {
-    message: "Hello from API!",
-    timestamp: new Date().toISOString(),
-  };
-});
-```
-
-### HTTP Methods
-
-Handle different HTTP methods:
-
-```typescript
-// routes/api/users/index.ts
-export default defineEventHandler(async (event) => {
-  const method = event.method;
-
-  if (method === "GET") {
-    return { users: [] };
-  }
-
-  if (method === "POST") {
-    const body = await readBody(event);
-    return { created: true, user: body };
-  }
-
-  return { error: "Method not allowed" };
-});
-```
-
-Or use method-specific handlers:
-
-```typescript
-// routes/api/users/index.get.ts
-export default defineEventHandler(() => {
-  return { users: [] };
-});
-
-// routes/api/users/index.post.ts
-export default defineEventHandler(async (event) => {
-  const body = await readBody(event);
-  return { created: true, user: body };
-});
-```
-
-### Dynamic Routes
-
-Use square brackets for dynamic parameters:
-
-```typescript
-// routes/api/users/[id].ts
-export default defineEventHandler((event) => {
-  const id = getRouterParam(event, "id");
-
-  return {
-    user: {
-      id,
-      name: "John Doe",
-    },
-  };
-});
-```
-
-### Request Handling
-
-Common H3 utilities:
-
-```typescript
-import {
-  readBody, // Parse request body
-  getQuery, // Get query parameters
-  getRouterParam, // Get route parameters
-  getCookie, // Get cookies
-  setCookie, // Set cookies
-  getHeader, // Get headers
-  setResponseStatus, // Set response status
-  sendRedirect, // Send redirect
-} from "h3";
-
-export default defineEventHandler(async (event) => {
-  // Get query params: /api/search?q=test
-  const query = getQuery(event);
-  console.log(query.q); // 'test'
-
-  // Get route params: /api/users/123
-  const id = getRouterParam(event, "id");
-
-  // Parse JSON body
-  const body = await readBody(event);
-
-  // Get headers
-  const auth = getHeader(event, "authorization");
-
-  // Set response status
-  setResponseStatus(event, 201);
-
-  return { success: true };
-});
-```
-
-### Error Handling
-
-```typescript
-export default defineEventHandler((event) => {
-  const id = getRouterParam(event, "id");
-
-  if (!id) {
-    throw createError({
-      statusCode: 400,
-      statusMessage: "ID is required",
-    });
-  }
-
-  // Your logic here
-  return { id };
-});
-```
-
-### Middleware
-
-Create middleware in `routes/` with `.ts` extension:
-
-```typescript
-// routes/middleware/auth.ts
-export default defineEventHandler((event) => {
-  const token = getHeader(event, "authorization");
-
-  if (!token) {
-    throw createError({
-      statusCode: 401,
-      statusMessage: "Unauthorized",
-    });
-  }
-
-  // Add user to context
-  event.context.user = { name: "John" };
-});
-```
-
----
-
-## Vite Plugins Guide
-
-### vite-plugin-svgr
-
-Import SVGs as React components by adding `?react` query:
-
-```tsx
-import Logo from "@/assets/react.svg?react";
-
-export const App = () => {
-  return (
-    <div>
-      <Logo />
-    </div>
-  );
-};
-```
-
-### unplugin-fonts
-
-Configure Google Fonts in `configs/fonts.config.ts`:
-
-```typescript
-export const fonts = [
-  {
-    name: "Inter",
-    styles: "wght@300;400;500;600;700",
-  },
-  {
-    name: "Space Grotesk",
-    styles: "wght@300;400;500;700",
-  },
-];
-```
-
-[Documentation](https://github.com/cssninjaStudio/unplugin-fonts)
-
-### unplugin-auto-import
-
-Automatically imports React hooks and React Router hooks. No need to import `useState`, `useEffect`, `useNavigate`, etc.
-
-```tsx
-// No imports needed!
-export function Counter() {
-  const [count, setCount] = useState(0);
-  const navigate = useNavigate();
-
-  return (
-    <div>
-      <Button onClick={() => setCount(count + 1)}>Count: {count}</Button>
-    </div>
-  );
-}
-```
-
-To enable auto-import for shadcn/ui components, uncomment in `vite.config.ts`:
-
-```typescript
-AutoImport({
-  imports: ["react", "react-router"],
-  dirs: ["./src/components/ui"], // Uncomment this line
-});
-```
-
----
-
-## Project Structure
-
-```
-.
+```text
+PageOn_video_web/
 ├── src/
-│   ├── assets/          # Static assets (images, SVGs)
-│   ├── components/      # React components
-│   │   └── ui/         # shadcn/ui components
-│   ├── pages/          # Frontend routes (file-based)
-│   ├── hooks/          # Custom React hooks
-│   ├── utils/          # Utility functions
-│   ├── types/          # TypeScript types
-│   ├── constants/      # App constants
-│   ├── data/           # Static data
-│   ├── store/          # State management
-│   └── main.tsx        # App entry point
-├── routes/             # Backend API routes (file-based)
-│   └── api/           # API endpoints
-├── configs/            # Configuration files
-│   └── fonts.config.ts
-├── vite.config.ts      # Vite configuration
-├── tsconfig.json       # TypeScript config
-└── package.json
+│   ├── pages/               # 首页、结果页、收藏页等
+│   ├── components/          # UI 组件和交互组件
+│   ├── services/            # API、Supabase、评论/收藏/点赞服务
+│   ├── contexts/            # 认证上下文
+│   └── data/                # 本地示例数据
+├── routes/                  # Nitro/H3 示例路由（当前业务主要走配套后端）
+├── extension/               # 浏览器扩展源码
+├── public/                  # 静态资源、扩展 zip 输出
+├── ssl/                     # 本地 HTTPS 证书
+└── scripts/                 # 扩展打包等脚本
 ```
 
----
+## 先决条件
 
-## Path Aliases
+- Node.js 20+
+- npm
+- 配套后端仓库 `../YouTube-process`
 
-Use `@/` to import from `src/`:
+可选：
 
-```tsx
-import { Button } from "@/components/ui/button";
-import { cn } from "@/utils/cn";
-import type { User } from "@/types";
-```
+- Supabase 项目，用于登录、评论、点赞、收藏
 
----
+## 本地开发
 
-## Deployment
+### 1. 先启动后端
 
-### Docker
+默认开发代理会把 `/api` 转发到 `https://localhost:5000`，所以请先启动 `YouTube-process`。
+
+如果你的后端本地只跑 HTTP，请在前端环境变量里把 `VITE_BACKEND_TARGET` 改成 `http://localhost:5000`。
+
+### 2. 配置环境变量
+
+在仓库根目录创建 `.env.local`：
 
 ```bash
-# Build and run with Docker
-docker build -t react-ts-starter .
-docker run -p 5000:5000 react-ts-starter
+VITE_DEV_PORT=3000
+VITE_BACKEND_TARGET=https://localhost:5000
+
+# 可选：不配置时，登录/评论/收藏功能会降级或不可用
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
 ```
 
-### VPS Deployment with nginx
+说明：
 
-For production deployment on a VPS with nginx, PM2, and SSL configuration, see the complete guide:
+- 开发服务器默认使用仓库内 `ssl/server.crt` 和 `ssl/server.key`
+- 默认访问地址是 `https://localhost:3000`
+- 如果后端没有 HTTPS，可把 `VITE_BACKEND_TARGET` 改成 HTTP
 
-📖 **[VPS Deployment Guide](./DEPLOYMENT.md)**
+### 3. 安装并启动
 
-The guide includes:
+```bash
+npm install
+npm run dev
+```
 
-- nginx configuration for serving static files and proxying API requests
-- PM2 or systemd setup for running the Nitro server
-- SSL certificate setup with Let's Encrypt
-- Monitoring and troubleshooting tips
-- Update and maintenance procedures
+打开：
 
----
+- Web: `https://localhost:3000`
 
-## Notes
+## 常用脚本
 
-- This is a **client-side rendered (CSR)** application
-- For SEO or Server-Side Rendering, consider Next.js, Remix, or Astro
-- The Nitro backend is perfect for APIs, serverless functions, and edge deployments
+```bash
+npm run dev                # 本地开发
+npm run build              # 构建 Web 应用
+npm run preview            # 预览构建结果
+npm run lint               # ESLint
+npm run build:extension    # 构建浏览器扩展
+npm run package:extension  # 打包 extension.zip
+```
 
----
+## 浏览器扩展
 
-## Contributing
+扩展源码在 `extension/`，构建和打包流程：
 
-Contributions are welcome! Feel free to open issues or submit pull requests.
+```bash
+npm run build:extension
+npm run package:extension
+```
 
----
+产物输出到：
 
-## License
+- `extension/dist/`
+- `public/extension.zip`
 
-MIT
+扩展会在 YouTube 页面注入入口，并把当前视频链接回传到 Web 应用。
 
-# PageOn_video_web
+## 与后端的协作关系
+
+前端当前核心能力都依赖 `YouTube-process`：
+
+- 搜索视频：`POST /api/search-youtube`
+- 流式分析：`POST /api/process-video/stream`
+- 聊天：`POST /api/chat`
+- 翻译：`POST /api/translate-themes`
+- PDF：`GET/POST /api/generate-pdf/{video_id}`
+- 图片摘要：`POST /api/generate-key-takeaways-image`
+
+如果后端不可用，首页搜索、分析结果页、聊天和导出都会受影响。
+
+## Docker
+
+仓库内提供了 Web 侧 Docker 构建：
+
+```bash
+docker compose up --build
+```
+
+默认映射：
+
+- `http://localhost:3000`
+
+注意：这个容器只负责前端静态资源和 Nginx 代理，业务接口仍需要配套后端服务。
+
+## 当前状态说明
+
+- `README` 已按真实代码结构重写
+- 仓库名、`package.json` 名称和旧模板文案还未完全统一
+- `routes/` 中保留了 Nitro 示例代码，但当前主业务 API 依赖配套 Python 后端
