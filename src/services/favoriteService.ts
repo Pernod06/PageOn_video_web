@@ -197,17 +197,16 @@ export async function getUserFavoritesWithMetadata(userId: string): Promise<Favo
 
     // Merge favorites with video metadata
     interface VideoDataWithInfo {
-      videoInfo?: {
+      meta?: {
         title?: string;
-        thumbnail?: string;
       };
     }
     const videoMap = new Map(
       videos?.map((v) => [
         v.video_id,
         {
-          title: (v.video_data as VideoDataWithInfo)?.videoInfo?.title,
-          thumbnail: (v.video_data as VideoDataWithInfo)?.videoInfo?.thumbnail,
+          title: (v.video_data as VideoDataWithInfo)?.meta?.title,
+          thumbnail: `https://img.youtube.com/vi/${v.video_id}/maxresdefault.jpg`,
         },
       ]) || [],
     );

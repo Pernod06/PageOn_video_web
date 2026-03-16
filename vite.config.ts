@@ -18,11 +18,13 @@ const sslKeyPath = path.resolve(__dirname, "./ssl/server.key");
 const sslCertPath = path.resolve(__dirname, "./ssl/server.crt");
 // 强制使用 HTTP 模式（设置为 false 禁用 HTTPS）
 const useHttps = true; // fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath);
+const devPort = Number(process.env.VITE_DEV_PORT || 3000);
+const backendTarget = process.env.VITE_BACKEND_TARGET || "https://localhost:5000";
 
 export default defineConfig({
   server: {
     host: "0.0.0.0",
-    port: 3000,
+    port: devPort,
     // Enable HTTPS if certificates exist
     https: useHttps
       ? {
@@ -32,7 +34,7 @@ export default defineConfig({
       : undefined,
     proxy: {
       "/api": {
-        target: "https://localhost:5000",
+        target: backendTarget,
         changeOrigin: true,
         secure: false,
         timeout: 300000, // 5 minutes timeout

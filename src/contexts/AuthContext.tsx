@@ -90,8 +90,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // 获取当前 URL 作为 OAuth 回调后的重定向地址（不包含 hash fragment）
   const getCurrentUrl = () => {
-    // 使用 origin + pathname + search，排除 hash fragment（#access_token=...）
-    return window.location.origin + window.location.pathname + window.location.search;
+    const url = new URL(window.location.href);
+    // 清理 OAuth 失败后残留参数，避免下一次登录继续携带错误参数
+    const authParams = [
+      "error",
+      "error_code",
+      "error_description",
+      "code",
+      "sb",
+      "state",
+      "provider_token",
+      "provider_refresh_token",
+    ];
+    authParams.forEach((key) => url.searchParams.delete(key));
+    url.hash = "";
+    return `${url.origin}${url.pathname}${url.search}`;
   };
 
   const signInWithGoogle = async (options?: { queryParams?: { [key: string]: string } }) => {

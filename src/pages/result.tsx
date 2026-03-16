@@ -113,14 +113,6 @@ export interface StructuredArticleV2 {
 // ============ End V2.0 Interfaces ============
 
 interface VideoData {
-  // V2.0 Structured Article fields (Only V2.0 format supported)
-  videoInfo?: {
-    videoId: string;
-    title: string;
-    description?: string;
-    thumbnail?: string;
-    summary?: string;
-  };
   chapters?: Array<{
     timestamp: number;
     title: string;
@@ -320,7 +312,6 @@ export default function Result() {
     chapters: initialChapters = [],
     isExample = false,
     language: initialLanguage = "en",
-    videoInfo: initialVideoInfo = null,
     main_body: initialMainBody = null,
     cached = false,
     streamingUrl = null, // 流式分析 URL
@@ -330,7 +321,6 @@ export default function Result() {
     chapters?: Chapter[];
     isExample?: boolean;
     language?: string;
-    videoInfo?: VideoData["videoInfo"];
     main_body?: VideoData["main_body"];
     cached?: boolean;
     streamingUrl?: string | null;
@@ -367,17 +357,7 @@ export default function Result() {
   // 流式分析状态
   const [isStreaming, setIsStreaming] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
-  // 流式增量解析/节流相关 refs（避免每个 chunk 都 JSON.parse 全量内容导致 UI 卡顿）
   const fullStreamContentRef = useRef<string>("");
-  const streamChunkAccRef = useRef<string>("");
-  const streamFlushRafRef = useRef<number | null>(null);
-  const streamParseStateRef = useRef<{
-    videoInfoDone: boolean;
-    videoInfoStart: number;
-  }>({
-    videoInfoDone: false,
-    videoInfoStart: -1,
-  });
   const [activeTab, setActiveTab] = useState<TabType>("transcript");
   const [chatMessages, setChatMessages] = useState([
     { type: "bot", content: "Hello! I'm your video assistant. How can I help you?" },
@@ -390,6 +370,9 @@ export default function Result() {
   const [transcriptData, setTranscriptData] = useState<Array<{ timestamp: string; text: string }>>(
     [],
   );
+  const [transcriptLoadState, setTranscriptLoadState] = useState<
+    "idle" | "loading" | "ready" | "empty"
+  >(initialVideoId || paramVideoId || streamingUrl ? "loading" : "idle");
   const [currentTranscriptIndex, setCurrentTranscriptIndex] = useState<number>(-1);
   const [, setComments] = useState<Comment[]>([]);
   const [, setCommentsLoading] = useState(false);
@@ -444,100 +427,13 @@ export default function Result() {
 
   // 保存完整的 transcript 文本内容
   const transcriptContent = useRef<string>("");
+  const resolvedVideoTitle = videoData?.meta?.title || title || "Video Analysis";
 
   const transcriptRefs = useRef<(HTMLDivElement | null)[]>([]);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const youtubeIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const transcriptPostStreamRetryRef = useRef(false);
   const [youtubeStartTime, setYoutubeStartTime] = useState(0);
-
-  // 增量解析：从 SSE 累积文本中尽量提取已"闭合"的 videoInfo / section 对象
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const flushStreamingUpdates = useCallback(() => {
-    streamFlushRafRef.current = null;
-    if (!streamChunkAccRef.current) return;
-
-    fullStreamContentRef.current += streamChunkAccRef.current;
-    streamChunkAccRef.current = "";
-
-    // 清理 markdown 代码块标记（LLM 可能输出 ```json ... ```）
-    let content = fullStreamContentRef.current;
-    // 移除开头的 ```json 或 ```
-    content = content.replace(/^```json?\s*\n?/, "");
-    // 移除结尾的 ```（如果已经完整）
-    content = content.replace(/\n?```\s*$/, "");
-
-    // 调试：打印内容前100字符，看看是否正确
-    if (content.length < 200) {
-      console.log("[Stream] content preview:", content.slice(0, 200));
-    }
-    const state = streamParseStateRef.current;
-    const patch: Partial<VideoData> = {};
-
-    // 1) videoInfo：只要拿到完整的 { ... } 就 parse 一次
-    if (!state.videoInfoDone) {
-      if (state.videoInfoStart === -1) {
-        const idx = content.indexOf('"videoInfo"');
-        if (idx !== -1) state.videoInfoStart = idx;
-      }
-      if (state.videoInfoStart !== -1) {
-        const braceStart = content.indexOf("{", state.videoInfoStart);
-        if (braceStart !== -1) {
-          let depth = 0;
-          let inString = false;
-          let escape = false;
-          for (let i = braceStart; i < content.length; i++) {
-            const ch = content[i];
-            if (escape) {
-              escape = false;
-              continue;
-            }
-            if (ch === "\\\\") {
-              if (inString) escape = true;
-              continue;
-            }
-            if (ch === '"') {
-              inString = !inString;
-              continue;
-            }
-            if (inString) continue;
-            if (ch === "{") depth++;
-            if (ch === "}") {
-              depth--;
-              if (depth === 0) {
-                const objStr = content.slice(braceStart, i + 1);
-                try {
-                  patch.videoInfo = JSON.parse(objStr);
-                  state.videoInfoDone = true;
-                } catch {
-                  // ignore
-                }
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // V2.0: 只解析 videoInfo，完整的 V2.0 JSON 由后端一次性发送
-    if (Object.keys(patch).length > 0) {
-      console.log("[Stream] 解析到数据:", {
-        hasVideoInfo: !!patch.videoInfo,
-      });
-      setVideoData((prev) => {
-        const base: VideoData = prev || {};
-        const merged: VideoData = { ...base, ...patch };
-        console.log("[Stream] 更新 videoData");
-        return merged;
-      });
-    } else {
-      // 调试：看看为什么没有解析到数据
-      console.log("[Stream] flush 但无数据:", {
-        contentLen: content.length,
-        videoInfoDone: state.videoInfoDone,
-      });
-    }
-  }, []);
 
   // 流式分析视频
   const startStreamingAnalysis = useCallback(
@@ -546,12 +442,9 @@ export default function Result() {
       setIsStreaming(true);
       setLoading(true);
       setVideoData(null);
+      setTranscriptLoadState("loading");
+      transcriptPostStreamRetryRef.current = false;
       fullStreamContentRef.current = "";
-      streamChunkAccRef.current = "";
-      streamParseStateRef.current = {
-        videoInfoDone: false,
-        videoInfoStart: -1,
-      };
 
       abortControllerRef.current = new AbortController();
 
@@ -625,10 +518,6 @@ export default function Result() {
                     });
                   }
 
-                  // 更新 videoId（如果还没有设置的话，或者从流式分析中获取到了更准确的信息）
-                  if (finalData.videoInfo?.videoId) {
-                    setVideoId((prev) => prev || finalData.videoInfo?.videoId);
-                  }
                   if (finalData.chapters) {
                     setChapters(finalData.chapters as Chapter[]);
                   }
@@ -655,20 +544,9 @@ export default function Result() {
                 continue;
               }
 
-              // 处理结构化事件流 {"type": "video_info" | "delta", ...}
+              // 处理结构化事件流 {"type": "delta", ...}
               try {
                 const event = JSON.parse(payload);
-
-                if (event.type === "video_info" && event.data) {
-                  console.log("[Stream] 收到 video_info 事件:", event.data.title);
-                  setVideoData((prev) => ({
-                    ...(prev ?? {}),
-                    videoInfo: event.data,
-                  }));
-                  // 更新 videoId（如果还没有设置的话）
-                  setVideoId((prev) => prev || event.data.videoId);
-                  continue;
-                }
 
                 // 处理 delta 事件：累积内容并尝试增量解析
                 if (event.type === "delta" && event.content) {
@@ -958,10 +836,18 @@ export default function Result() {
       setPlayerReady(false); // 重置 player ready 状态
 
       // 如果有从 index.tsx 传过来的完整数据（翻译后的缓存数据），直接使用
-      if (initialMainBody && initialVideoInfo) {
+      if (initialMainBody) {
         console.log("[Result] ✅ Using pre-loaded data from navigation state (translated)");
         setVideoData({
-          videoInfo: initialVideoInfo,
+          meta: title
+            ? {
+                title,
+                tags: [],
+                reading_time: "",
+                difficulty: "",
+                last_updated: "",
+              }
+            : undefined,
           main_body: initialMainBody,
         });
         setLoading(false);
@@ -1080,7 +966,7 @@ export default function Result() {
       await loadVideoData(videoId, false, newLanguage);
       console.log(
         "[Result] 🌐 Language change: data loaded, current videoData title:",
-        videoData?.videoInfo?.title,
+        videoData?.meta?.title,
       );
 
       // 翻译现有的 themes（如果有的话）
@@ -1435,14 +1321,25 @@ export default function Result() {
     }
   };
 
-  const loadTranscript = async (id: string, useLocalCache: boolean = false) => {
+  const loadTranscript = async (
+    id: string,
+    useLocalCache: boolean = false,
+    options?: { suppressEmptyOnFailure?: boolean },
+  ): Promise<boolean> => {
+    const suppressEmptyOnFailure = options?.suppressEmptyOnFailure ?? false;
     if (!id) {
       console.warn("[Result] Cannot load transcript: no video ID provided");
       setTranscriptData([]);
-      return;
+      setTranscriptLoadState("empty");
+      return false;
     }
 
     console.log("[Result] Loading transcript for:", id, "useLocalCache:", useLocalCache);
+    setTranscriptLoadState("loading");
+    if (!suppressEmptyOnFailure) {
+      setTranscriptData([]);
+      transcriptRefs.current = [];
+    }
 
     // 如果是示例视频，优先使用本地缓存
     if (useLocalCache) {
@@ -1456,7 +1353,8 @@ export default function Result() {
           transcriptContent.current = text;
           const parsed = parseTranscript(text);
           setTranscriptData(parsed);
-          return;
+          setTranscriptLoadState(parsed.length > 0 ? "ready" : "empty");
+          return parsed.length > 0;
         }
       } catch (localError) {
         console.error("[Result] ❌ Local cache failed:", localError);
@@ -1475,8 +1373,9 @@ export default function Result() {
         transcriptContent.current = text;
         const parsed = parseTranscript(text);
         setTranscriptData(parsed);
+        setTranscriptLoadState(parsed.length > 0 ? "ready" : "empty");
         console.log("[Result] ✅ Transcript loaded from API, entries:", parsed.length);
-        return;
+        return parsed.length > 0;
       } else {
         console.warn("[Result] API returned status:", response.status);
         // 如果 API 返回错误，继续尝试 fallback
@@ -1496,25 +1395,83 @@ export default function Result() {
         transcriptContent.current = text;
         const parsed = parseTranscript(text);
         setTranscriptData(parsed);
+        setTranscriptLoadState(parsed.length > 0 ? "ready" : "empty");
         console.log("[Result] ✅ Local transcript loaded, entries:", parsed.length);
+        return parsed.length > 0;
       } else {
         console.error("[Result] ❌ Local file not found, status:", localResponse.status);
-        // 所有方法都失败，设置空数组避免一直显示 loading
-        setTranscriptData([]);
+        if (!suppressEmptyOnFailure) {
+          setTranscriptData([]);
+          setTranscriptLoadState("empty");
+        }
+        return false;
       }
     } catch (localError) {
       console.error("[Result] ❌ Failed to load local transcript:", localError);
-      // 所有方法都失败，设置空数组避免一直显示 loading
-      setTranscriptData([]);
+      if (!suppressEmptyOnFailure) {
+        setTranscriptData([]);
+        setTranscriptLoadState("empty");
+      }
+      return false;
     }
   };
 
-  // 辅助函数：将时间戳 "MM:SS" 转换为秒数
+  // 流式分析时 transcript 可能晚于 [DONE] 入库，结束后轮询重试多次，避免过早显示 unavailable
+  useEffect(() => {
+    if (!streamingUrl || isStreaming) return;
+    if (transcriptPostStreamRetryRef.current) return;
+    if (transcriptData.length > 0) return;
+
+    const resolvedVideoId = extractedVideoIdRef.current || videoId || paramVideoId;
+    if (!resolvedVideoId) return;
+
+    transcriptPostStreamRetryRef.current = true;
+    let cancelled = false;
+
+    const retryLoadTranscript = async () => {
+      const maxAttempts = 6;
+      const retryDelayMs = 1400;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (cancelled) return;
+        const loaded = await loadTranscript(resolvedVideoId, false, {
+          suppressEmptyOnFailure: attempt < maxAttempts,
+        });
+        if (loaded) return;
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+        }
+      }
+
+      if (!cancelled) {
+        setTranscriptLoadState("empty");
+      }
+    };
+
+    retryLoadTranscript().catch((err) => {
+      console.error("[Result] Post-stream transcript retry failed:", err);
+      if (!cancelled) {
+        setTranscriptLoadState("empty");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamingUrl, isStreaming, transcriptData.length, videoId, paramVideoId]);
+
+  // 辅助函数：将时间戳 "MM:SS" / "HH:MM:SS" 转换为秒数
   const parseTimestamp = (timestamp: string): number => {
-    const parts = timestamp.split(":");
-    const minutes = parseInt(parts[0], 10);
-    const seconds = parseInt(parts[1], 10);
-    return minutes * 60 + seconds;
+    const parts = timestamp.split(":").map((part) => parseInt(part, 10));
+    if (parts.some((part) => Number.isNaN(part))) return 0;
+    if (parts.length === 2) {
+      return parts[0] * 60 + parts[1];
+    }
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+    return 0;
   };
 
   const parseTranscript = (text: string): Array<{ timestamp: string; text: string }> => {
@@ -1536,8 +1493,8 @@ export default function Result() {
         continue;
       }
 
-      // Match lines with timestamps like [00:00] or [00:00] - text
-      const timestampMatch = line.match(/\[(\d{2}:\d{2})\]\s*-?\s*(.*)/);
+      // Match lines with timestamps like [MM:SS] / [HH:MM:SS] with optional "-"
+      const timestampMatch = line.match(/\[(\d{2}:\d{2}(?::\d{2})?)\]\s*-?\s*(.*)/);
 
       if (timestampMatch) {
         currentTimestamp = timestampMatch[1];
@@ -2179,7 +2136,7 @@ export default function Result() {
 
         const data = await response.json();
         console.log("[Result] ✅ Video data loaded successfully");
-        console.log("[Result] 📝 Video title:", data?.videoInfo?.title);
+        console.log("[Result] 📝 Video title:", data?.meta?.title);
         console.log("[Result] 📝 First section title:", data?.main_body?.[0]?.section_title);
         setVideoData(data);
         return;
@@ -2303,7 +2260,7 @@ export default function Result() {
   };
 
   const handleSendMessage = async () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || isChatThinking) return;
 
     setChatMessages((prev) => [...prev, { type: "user", content: chatInput }]);
     const userMessage = chatInput;
@@ -2311,6 +2268,40 @@ export default function Result() {
     setIsChatThinking(true);
 
     try {
+      // 优先使用已加载的全文 transcript；若为空则尝试即时拉取，确保 chat prompt 带上字幕上下文
+      let transcriptForPrompt = transcriptContent.current?.trim() || "";
+      if (!transcriptForPrompt && videoId) {
+        try {
+          const transcriptApiResponse = await fetch(`${API_BASE_URL}/api/transcript/${videoId}`);
+          if (transcriptApiResponse.ok) {
+            transcriptForPrompt = (await transcriptApiResponse.text()).trim();
+          } else {
+            const localResponse = await fetch(`/data/transcript/transcript_${videoId}.txt`);
+            if (localResponse.ok) {
+              transcriptForPrompt = (await localResponse.text()).trim();
+            }
+          }
+          if (transcriptForPrompt) {
+            transcriptContent.current = transcriptForPrompt;
+          }
+        } catch (transcriptErr) {
+          console.warn("[Chat] Failed to fetch transcript for prompt:", transcriptErr);
+        }
+      }
+
+      // 最后兜底：如果全文 transcript 还没拿到，用已解析的 transcriptData 片段拼接
+      if (!transcriptForPrompt && transcriptData.length > 0) {
+        transcriptForPrompt = transcriptData
+          .map((item) => `[${item.timestamp}] ${item.text}`)
+          .join("\n");
+      }
+
+      // 控制上下文大小，避免 prompt 过大导致响应慢或失败
+      const MAX_CHAT_TRANSCRIPT_CHARS = 18000;
+      if (transcriptForPrompt.length > MAX_CHAT_TRANSCRIPT_CHARS) {
+        transcriptForPrompt = transcriptForPrompt.slice(0, MAX_CHAT_TRANSCRIPT_CHARS);
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2319,10 +2310,15 @@ export default function Result() {
           video_context: {
             videoId,
             title,
-            transcript: transcriptContent.current, // 添加完整的 transcript 内容
+            transcript: transcriptForPrompt,
           },
         }),
       });
+
+      if (!response.ok) {
+        throw new Error(`Chat API failed: ${response.status}`);
+      }
+
       const data = await response.json();
       console.log("[Chat] Response received:", data);
 
@@ -2339,6 +2335,14 @@ export default function Result() {
             startClipPlayback(clips);
           }, 100);
         }
+      } else {
+        const fallbackMessage =
+          data?.detail?.response ||
+          data?.detail?.error ||
+          data?.error ||
+          data?.message ||
+          "Sorry, I couldn't generate a response this time.";
+        setChatMessages((prev) => [...prev, { type: "bot", content: fallbackMessage }]);
       }
     } catch (error) {
       console.error("Chat error:", error);
@@ -2349,6 +2353,8 @@ export default function Result() {
           content: "Sorry, I'm having trouble processing your request. Please try again later.",
         },
       ]);
+    } finally {
+      setIsChatThinking(false);
     }
   };
 
@@ -2391,8 +2397,6 @@ export default function Result() {
         status: "failed",
         errorMessage: error instanceof Error ? error.message : "网络请求失败",
       });
-    } finally {
-      setIsChatThinking(false);
     }
   };
 
@@ -2414,7 +2418,7 @@ export default function Result() {
         },
         body: JSON.stringify({
           notes: notesForExport,
-          videoTitle: videoData?.videoInfo?.title || title || "Video Analysis",
+          videoTitle: resolvedVideoTitle,
         }),
       });
 
@@ -2422,7 +2426,7 @@ export default function Result() {
       const downloadUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = downloadUrl;
-      a.download = `${title || "video"}.pdf`;
+      a.download = `${resolvedVideoTitle || "video"}.pdf`;
       a.click();
     } catch (error) {
       console.error("PDF download failed:", error);
@@ -3762,7 +3766,16 @@ export default function Result() {
                 {/* Transcript Tab */}
                 {activeTab === "transcript" && (
                   <div className="space-y-3 p-4">
-                    {transcriptData.length > 0 ? (
+                    {transcriptLoadState === "loading" ? (
+                      <div className="space-y-2 py-1">
+                        {Array.from({ length: 8 }).map((_, idx) => (
+                          <div key={idx} className="rounded-md bg-gray-100 px-3 py-2 animate-pulse">
+                            <div className="h-3 w-full rounded bg-gray-200"></div>
+                          </div>
+                        ))}
+                        <p className="pt-1 text-center text-xs text-gray-500">Loading transcript...</p>
+                      </div>
+                    ) : transcriptData.length > 0 ? (
                       transcriptData.map((item, index) => (
                         <div
                           key={index}
@@ -3779,10 +3792,14 @@ export default function Result() {
                           <div className="text-xs leading-relaxed text-gray-700">{item.text}</div>
                         </div>
                       ))
-                    ) : (
+                    ) : transcriptLoadState === "empty" ? (
                       <p className="py-8 text-center text-xs text-gray-500">
-                        Loading transcript...
+                        {isStreaming
+                          ? "Transcript is being prepared..."
+                          : "Transcript is unavailable for this video."}
                       </p>
+                    ) : (
+                      <p className="py-8 text-center text-xs text-gray-500">Loading transcript...</p>
                     )}
                   </div>
                 )}
@@ -3934,13 +3951,15 @@ export default function Result() {
                             }
                           }}
                           placeholder="Ask about the video..."
+                          disabled={isChatThinking}
                           className={`flex-1 rounded-lg border px-3 py-2 text-xs transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none ${
                             isDragOver ? "border-blue-400 bg-blue-50" : ""
                           }`}
                         />
                         <button
                           onClick={handleSendMessage}
-                          className="rounded-lg bg-blue-600 px-3 py-2 text-white transition-colors hover:bg-blue-700"
+                          disabled={isChatThinking || !chatInput.trim()}
+                          className="rounded-lg bg-blue-600 px-3 py-2 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
                         >
                           <svg
                             className="h-4 w-4"
