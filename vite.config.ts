@@ -6,6 +6,7 @@ import { defineConfig } from "vite";
 // vite plugins
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react-swc";
+import nitro from "nitro/vite";
 import Fonts from "unplugin-fonts/vite";
 import Inspect from "vite-plugin-inspect";
 import Pages from "vite-plugin-pages";
@@ -79,6 +80,7 @@ export default defineConfig({
 
   plugins: [
     react(),
+    nitro(),
     Pages({
       dirs: "src/pages",
       extensions: ["tsx", "jsx"],

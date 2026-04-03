@@ -14,14 +14,20 @@
     "lint-staged": "lint-staged"
   },
   "dependencies": {
+    "@langchain/core": "^1.1.38",
+    "@langchain/openai": "^1.4.1",
     "@radix-ui/react-slot": "^1.2.3",
     "@supabase/supabase-js": "^2.87.0",
     "@tailwindcss/vite": "^4.1.14",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "googleapis": "^171.4.0",
+    "langchain": "^1.2.39",
     "lucide-react": "^0.544.0",
     "mermaid": "^11.12.2",
     "nitro": "^3.0.1-alpha.0",
+    "openai": "^6.33.0",
+    "pdfmake": "^0.3.7",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
@@ -30,7 +36,8 @@
     "tailwindcss-animate": "^1.0.7",
     "virtual": "^0.2.0",
     "vite-plugin-pages": "^0.33.1",
-    "vite-plugin-svgr": "^4.5.0"
+    "vite-plugin-svgr": "^4.5.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.19",
